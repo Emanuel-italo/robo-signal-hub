@@ -1,89 +1,110 @@
 import { useState } from "react";
-import { Card } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import Dashboard from "@/components/trading/Dashboard";
 import Positions from "@/components/trading/Positions";
 import TradeHistory from "@/components/trading/TradeHistory";
 import Settings from "@/components/trading/Settings";
 import LiveLogs from "@/components/trading/LiveLogs";
-import { Activity, TrendingUp, History, Settings as SettingsIcon, Terminal } from "lucide-react";
+import { 
+  LayoutDashboard, 
+  TrendingUp, 
+  History, 
+  Terminal, 
+  Settings as SettingsIcon,
+  LineChart
+} from "lucide-react";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+  SidebarInset
+} from "@/components/ui/sidebar";
+import { Separator } from "@/components/ui/separator";
 
 const Index = () => {
-  const [activeTab, setActiveTab] = useState("dashboard");
+  const [activeView, setActiveView] = useState("dashboard");
+
+  // Mapeamento das telas
+  const renderContent = () => {
+    switch (activeView) {
+      case "dashboard": return <Dashboard />;
+      case "positions": return <Positions />;
+      case "history": return <TradeHistory />;
+      case "logs": return <LiveLogs />;
+      case "settings": return <Settings />;
+      default: return <Dashboard />;
+    }
+  };
+
+  const menuItems = [
+    { title: "Visão Geral", id: "dashboard", icon: LayoutDashboard },
+    { title: "Posições Abertas", id: "positions", icon: TrendingUp },
+    { title: "Histórico", id: "history", icon: History },
+    { title: "Logs do Sistema", id: "logs", icon: Terminal },
+    { title: "Configurações", id: "settings", icon: SettingsIcon },
+  ];
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-50">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-primary rounded-lg flex items-center justify-center">
-                <TrendingUp className="w-6 h-6 text-primary-foreground" />
+    <SidebarProvider>
+      <div className="flex min-h-screen w-full bg-background">
+        <Sidebar>
+          <SidebarContent>
+            <div className="p-4 flex items-center gap-2 font-bold text-xl text-primary">
+              <div className="w-8 h-8 bg-primary text-primary-foreground rounded flex items-center justify-center">
+                <LineChart className="w-5 h-5" />
               </div>
-              <div>
-                <h1 className="text-2xl font-bold text-foreground">CryptoTrader AI</h1>
-                <p className="text-sm text-muted-foreground">Automated Trading System</p>
-              </div>
+              CryptoTrader AI
             </div>
-            <div className="flex items-center gap-2">
-              <div className="px-3 py-1 bg-success/20 text-success rounded-full text-sm font-medium flex items-center gap-2">
-                <span className="w-2 h-2 bg-success rounded-full animate-pulse"></span>
-                Sistema Ativo
-              </div>
+            <Separator className="mb-4 opacity-50" />
+            
+            <SidebarGroup>
+              <SidebarGroupLabel>Menu Principal</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {menuItems.map((item) => (
+                    <SidebarMenuItem key={item.id}>
+                      <SidebarMenuButton 
+                        isActive={activeView === item.id}
+                        onClick={() => setActiveView(item.id)}
+                        className="h-10"
+                      >
+                        <item.icon className="w-4 h-4" />
+                        <span>{item.title}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </SidebarContent>
+        </Sidebar>
+
+        <SidebarInset className="flex flex-col min-w-0">
+          <header className="flex h-14 items-center gap-4 border-b bg-card/50 px-4 backdrop-blur-sm sticky top-0 z-10">
+            <SidebarTrigger />
+            <div className="flex-1 font-medium">
+              {menuItems.find(i => i.id === activeView)?.title}
             </div>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="container mx-auto px-4 py-6">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="bg-card border border-border">
-            <TabsTrigger value="dashboard" className="gap-2">
-              <Activity className="w-4 h-4" />
-              Dashboard
-            </TabsTrigger>
-            <TabsTrigger value="positions" className="gap-2">
-              <TrendingUp className="w-4 h-4" />
-              Posições
-            </TabsTrigger>
-            <TabsTrigger value="history" className="gap-2">
-              <History className="w-4 h-4" />
-              Histórico
-            </TabsTrigger>
-            <TabsTrigger value="logs" className="gap-2">
-              <Terminal className="w-4 h-4" />
-              Logs
-            </TabsTrigger>
-            <TabsTrigger value="settings" className="gap-2">
-              <SettingsIcon className="w-4 h-4" />
-              Configurações
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="dashboard" className="space-y-6">
-            <Dashboard />
-          </TabsContent>
-
-          <TabsContent value="positions" className="space-y-6">
-            <Positions />
-          </TabsContent>
-
-          <TabsContent value="history" className="space-y-6">
-            <TradeHistory />
-          </TabsContent>
-
-          <TabsContent value="logs" className="space-y-6">
-            <LiveLogs />
-          </TabsContent>
-
-          <TabsContent value="settings" className="space-y-6">
-            <Settings />
-          </TabsContent>
-        </Tabs>
-      </main>
-    </div>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="w-2 h-2 bg-success rounded-full animate-pulse" />
+              Sistema Online
+            </div>
+          </header>
+          
+          <main className="flex-1 p-6 overflow-auto">
+            <div className="max-w-6xl mx-auto space-y-6">
+              {renderContent()}
+            </div>
+          </main>
+        </SidebarInset>
+      </div>
+    </SidebarProvider>
   );
 };
 
