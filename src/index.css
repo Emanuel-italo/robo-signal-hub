@@ -2,74 +2,48 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
-All colors MUST be HSL.
-*/
-
 @layer base {
   :root {
-    --background: 220 20% 8%;
-    --foreground: 210 20% 98%;
+    /* --- CORES GERAIS (DARK MODE) --- */
+    --background: 0 0% 2%;       /* Preto Fundo */
+    --foreground: 0 0% 98%;      /* Texto Branco */
 
-    --card: 220 18% 12%;
-    --card-foreground: 210 20% 98%;
+    --card: 0 0% 4%;             /* Cartões Grafite */
+    --card-foreground: 0 0% 98%;
 
-    --popover: 220 20% 10%;
-    --popover-foreground: 210 20% 98%;
+    --popover: 0 0% 4%;
+    --popover-foreground: 0 0% 98%;
 
-    --primary: 142 76% 36%;
-    --primary-foreground: 210 20% 98%;
+    --primary: 354 85% 55%;      /* Vermelho Neon Principal */
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 220 15% 18%;
-    --secondary-foreground: 210 20% 98%;
+    --secondary: 354 10% 10%;
+    --secondary-foreground: 0 0% 98%;
 
-    --muted: 220 15% 18%;
-    --muted-foreground: 210 15% 65%;
+    --muted: 0 0% 8%;
+    --muted-foreground: 0 0% 60%;
 
-    --accent: 217 91% 60%;
-    --accent-foreground: 210 20% 98%;
+    --accent: 354 40% 10%;       /* Vermelho Sangue (Hover) */
+    --accent-foreground: 0 0% 98%;
 
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 210 20% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
 
-    --success: 142 76% 36%;
-    --success-foreground: 210 20% 98%;
+    --border: 354 10% 12%;       /* Bordas Sutis */
+    --input: 354 10% 12%;
+    --ring: 354 85% 55%;
 
-    --warning: 38 92% 50%;
-    --warning-foreground: 220 20% 8%;
+    --radius: 1rem;
 
-    --border: 220 15% 20%;
-    --input: 220 15% 18%;
-    --ring: 142 76% 36%;
-
-    --radius: 0.75rem;
-    
-    --chart-1: 142 76% 36%;
-    --chart-2: 0 84% 60%;
-    --chart-3: 217 91% 60%;
-    --chart-4: 38 92% 50%;
-    --chart-5: 280 65% 60%;
-
-    --sidebar-background: 0 0% 98%;
-
-    --sidebar-foreground: 240 5.3% 26.1%;
-
-    --sidebar-primary: 240 5.9% 10%;
-
-    --sidebar-primary-foreground: 0 0% 98%;
-
-    --sidebar-accent: 240 4.8% 95.9%;
-
-    --sidebar-accent-foreground: 240 5.9% 10%;
-
-    --sidebar-border: 220 13% 91%;
-
-    --sidebar-ring: 217.2 91.2% 59.8%;
-  }
-
-  .dark {
-    --background: 220 20% 8%;
-    --foreground: 210 20% 98%;
+    /* --- CORREÇÃO DO MENU LATERAL (SIDEBAR) --- */
+    --sidebar-background: 0 0% 3%;    /* Fundo do Menu: Preto */
+    --sidebar-foreground: 0 0% 98%;   /* Texto do Menu: Branco */
+    --sidebar-primary: 354 85% 55%;   /* Destaque: Vermelho */
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 354 30% 10%;    /* Hover do Menu: Vermelho Escuro */
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 354 10% 12%;
+    --sidebar-ring: 354 85% 55%;
   }
 }
 
@@ -77,8 +51,27 @@ All colors MUST be HSL.
   * {
     @apply border-border;
   }
-
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans antialiased;
+    /* Grid Tech de Fundo */
+    background-image: linear-gradient(to right, rgba(220, 38, 38, 0.08) 1px, transparent 1px),
+                      linear-gradient(to bottom, rgba(220, 38, 38, 0.08) 1px, transparent 1px);
+    background-size: 40px 40px;
   }
+}
+
+/* Animações */
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-5px); }
+  100% { transform: translateY(0px); }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* Efeito de Vidro Escuro */
+.glass-panel {
+  @apply bg-black/60 backdrop-blur-xl border border-red-900/20 shadow-2xl shadow-red-900/10;
 }

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
-import { Wallet, DollarSign, Activity, Power, TrendingUp, TrendingDown, Trophy, XCircle } from "lucide-react";
+import { Wallet, DollarSign, Activity, Power, TrendingUp, Target, BrainCircuit, Zap, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -9,14 +9,18 @@ import {
 } from "recharts";
 import { api } from "@/services/api";
 import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
+import { useWakeLock } from "@/hooks/use-wake-lock";
+import MarketTicker from "./MarketTicker";
 
-// Interfaces
 interface BotStatus {
   isRunning: boolean;
   balance: number;
   equity: number;
   dailyTrades: number;
   totalTrades: number;
+  marketPrices: Record<string, number>;
+  lastEvent: { symbol: string, type: 'BUY' | 'SELL', price?: number, pnl?: number } | null;
 }
 
 interface ChartData {
@@ -24,21 +28,15 @@ interface ChartData {
   value: number;
 }
 
-interface Trade {
-  pnl: number;
-}
-
-const COLORS = ['#10b981', '#ef4444']; // Verde (Win) e Vermelho (Loss)
+const COLORS = ['#ef4444', '#fca5a5'];
 
 const Dashboard = () => {
-  // 1. Busca Status do Robô (Equity, Saldo)
   const { data: rawStatus, refetch: refetchStatus } = useQuery({
     queryKey: ["botStatus"],
     queryFn: api.getStatus,
-    refetchInterval: 2000, 
+    refetchInterval: 1000, 
   });
 
-  // 2. Busca Histórico para calcular Win Rate
   const { data: history } = useQuery({
     queryKey: ["botHistory"],
     queryFn: api.getHistory,
@@ -46,42 +44,55 @@ const Dashboard = () => {
   });
 
   const status = rawStatus as BotStatus | undefined;
+  const { requestLock, releaseLock } = useWakeLock();
   
-  // Estado para gráficos
   const [equityData, setEquityData] = useState<ChartData[]>([]);
-  const [balanceData, setBalanceData] = useState<ChartData[]>([]); // Para o mini gráfico
   const [winRateData, setWinRateData] = useState<{name: string, value: number}[]>([]);
   const [trend, setTrend] = useState<'up' | 'down' | 'neutral'>('neutral');
 
-  // Atualiza Gráficos de Linha (Equity e Balance)
+  // Notificações
+  useEffect(() => {
+    if (status?.lastEvent) {
+      const evt = status.lastEvent;
+      if (evt.type === 'BUY') {
+        toast.success(`COMPRA EXECUTADA: ${evt.symbol}`, {
+          description: `Entrada em $${evt.price?.toFixed(2)}`,
+          className: "bg-black border-2 border-red-500/50 text-white font-bold"
+        });
+      } else if (evt.type === 'SELL') {
+        const isWin = (evt.pnl || 0) > 0;
+        toast(isWin ? "LUCRO REALIZADO!" : "STOP LOSS", {
+          description: `${evt.symbol} PnL: $${evt.pnl?.toFixed(2)}`,
+          className: isWin ? "bg-emerald-950 border-emerald-500 text-emerald-400" : "bg-red-950 border-red-500 text-red-400"
+        });
+      }
+    }
+  }, [status?.lastEvent]);
+
+  // Controle de Tela
+  useEffect(() => {
+    if (status?.isRunning) requestLock();
+    else releaseLock();
+  }, [status?.isRunning, requestLock, releaseLock]);
+
   useEffect(() => {
     if (status?.equity) {
       const now = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      
-      // Atualiza Equity (Gráfico Principal)
       setEquityData(prev => {
         const newData = [...prev, { time: now, value: status.equity }];
-        // Detecta tendência (compara último valor com penúltimo)
         if (prev.length > 0) {
           const last = prev[prev.length - 1].value;
           setTrend(status.equity > last ? 'up' : status.equity < last ? 'down' : 'neutral');
         }
-        return newData.slice(-30); // Mantém 30 pontos
-      });
-
-      // Atualiza Balance (Mini Gráfico)
-      setBalanceData(prev => {
-        const newData = [...prev, { time: now, value: status.balance }];
-        return newData.slice(-15); // Mantém 15 pontos para o card menor
+        return newData.slice(-40); 
       });
     }
   }, [status]);
 
-  // Calcula Win Rate para o Gráfico de Pizza
   useEffect(() => {
     if (history && Array.isArray(history)) {
-      const wins = history.filter((t: Trade) => t.pnl > 0).length;
-      const losses = history.filter((t: Trade) => t.pnl <= 0).length;
+      const wins = history.filter((t: any) => t.pnl > 0).length;
+      const losses = history.filter((t: any) => t.pnl <= 0).length;
       setWinRateData([
         { name: 'Wins', value: wins },
         { name: 'Losses', value: losses }
@@ -95,205 +106,208 @@ const Dashboard = () => {
     refetchStatus();
   };
 
-  // Componente de Mini Gráfico (Sparkline)
-  const MiniChart = ({ data, color }: { data: ChartData[], color: string }) => (
-    <div className="h-[40px] w-[80px]">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data}>
-          <Line type="monotone" dataKey="value" stroke={color} strokeWidth={2} dot={false} />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-
   return (
-    <div className="space-y-6 animate-in fade-in duration-500">
-      
-      {/* --- CABEÇALHO --- */}
-      <div className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-card/30 p-4 rounded-xl border border-border/50 backdrop-blur-sm">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Activity className="w-6 h-6 text-primary" />
-            Painel de Controle
-          </h2>
-          <p className="text-muted-foreground text-sm">Visão geral do desempenho em tempo real.</p>
+    <div className="space-y-8 animate-in fade-in zoom-in-95 duration-700">
+
+      {/* --- AQUI ESTÁ O TICKER QUE ESTAVA FALTANDO --- */}
+      {status?.marketPrices && (
+        <div className="rounded-xl border border-red-900/30 overflow-hidden shadow-lg bg-black/40 backdrop-blur-sm">
+           <MarketTicker prices={status.marketPrices} />
         </div>
-        <div className="flex items-center gap-4">
-          <div className="hidden md:flex flex-col items-end mr-4">
-            <span className="text-xs text-muted-foreground uppercase font-bold">Status do Sistema</span>
-            <div className="flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${status?.isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-destructive'}`} />
-              <span className={`font-mono font-medium ${status?.isRunning ? 'text-emerald-500' : 'text-destructive'}`}>
-                {status?.isRunning ? 'ONLINE' : 'PARADO'}
-              </span>
+      )}
+      
+      {/* Banner de Controle */}
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-red-600 to-red-500 p-8 text-white shadow-2xl shadow-red-500/30">
+        <div className="absolute top-0 right-0 -mt-10 -mr-10 w-64 h-64 bg-white/10 rounded-full blur-3xl"></div>
+        <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
+          <div className="flex items-center gap-4">
+            <div className="p-3 bg-white/20 backdrop-blur-md rounded-2xl">
+              <BrainCircuit className="w-8 h-8 text-white" />
+            </div>
+            <div>
+              <h2 className="text-3xl font-black tracking-tight">PAINEL DE COMANDO</h2>
+              <div className="flex items-center gap-2">
+                <p className="text-red-100 font-medium opacity-90">Inteligência Artificial Operacional</p>
+                {status?.isRunning && (
+                    <Badge className="bg-white/20 text-white border-none animate-pulse">
+                        <ShieldCheck className="w-3 h-3 mr-1" /> PROTEÇÃO ATIVA
+                    </Badge>
+                )}
+              </div>
             </div>
           </div>
+          
           <Button 
             size="lg"
-            variant={status?.isRunning ? "destructive" : "default"}
             onClick={handleToggleBot}
-            className="gap-2 shadow-lg hover:scale-105 transition-transform"
+            className={`h-14 px-8 text-lg font-bold tracking-wider transition-all duration-300 transform hover:scale-105 shadow-xl border-2
+              ${status?.isRunning 
+                ? "bg-white text-red-600 hover:bg-red-50 border-transparent" 
+                : "bg-transparent text-white border-white hover:bg-white/10"
+              }`}
           >
-            <Power className="w-4 h-4" />
-            {status?.isRunning ? "PARAR ROBÔ" : "INICIAR ROBÔ"}
+            <Power className={`w-5 h-5 mr-3 ${status?.isRunning ? "animate-pulse" : ""}`} />
+            {status?.isRunning ? "DESATIVAR SISTEMA" : "ATIVAR SISTEMA"}
           </Button>
         </div>
       </div>
 
-      {/* --- GRID DE STATUS (CARDS) --- */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {/* Grid de Métricas */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         
-        {/* Card Equity (Com Mini Gráfico e Tendência) */}
-        <Card className="p-6 bg-card border-border relative overflow-hidden group">
-          <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-            <Wallet className="w-16 h-16" />
-          </div>
-          <div className="flex justify-between items-start">
-            <div className="space-y-1">
-              <p className="text-sm font-medium text-muted-foreground">Capital Total (Equity)</p>
+        {/* Card Equity */}
+        <Card className="glass-panel p-6 relative overflow-hidden group hover:border-red-300 transition-all duration-300">
+          <div className="absolute right-0 top-0 w-32 h-32 bg-red-500/5 rounded-full blur-2xl -mr-10 -mt-10 transition-all group-hover:bg-red-500/10"></div>
+          <div className="flex flex-col h-full justify-between relative z-10">
+            <div>
+              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">Capital Total</p>
               <div className="flex items-center gap-2">
-                <p className="text-3xl font-bold text-foreground">
+                <h3 className="text-4xl font-black text-foreground">
                   {status?.equity ? `$${status.equity.toFixed(2)}` : "..."}
-                </p>
-                {trend === 'up' && <TrendingUp className="w-5 h-5 text-emerald-500 animate-bounce" />}
-                {trend === 'down' && <TrendingDown className="w-5 h-5 text-red-500 animate-bounce" />}
+                </h3>
+                {trend === 'up' && <TrendingUp className="w-6 h-6 text-primary animate-bounce" />}
               </div>
             </div>
-            <MiniChart data={equityData} color="#3b82f6" />
+            <div className="mt-4 h-16 opacity-50">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={equityData}>
+                  <Line type="monotone" dataKey="value" stroke="#ef4444" strokeWidth={3} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         </Card>
 
-        {/* Card Saldo (Com Mini Gráfico) */}
-        <Card className="p-6 bg-card border-border relative overflow-hidden group">
-          <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-            <DollarSign className="w-16 h-16" />
-          </div>
-          <div className="flex justify-between items-start">
-            <div className="space-y-1">
-              <p className="text-sm font-medium text-muted-foreground">Saldo Disponível</p>
-              <p className="text-3xl font-bold text-emerald-500">
+        {/* Card Saldo */}
+        <Card className="glass-panel p-6 relative overflow-hidden group hover:border-red-300 transition-all duration-300">
+          <div className="absolute right-0 top-0 w-32 h-32 bg-red-500/5 rounded-full blur-2xl -mr-10 -mt-10 transition-all group-hover:bg-red-500/10"></div>
+          <div className="flex justify-between items-start relative z-10">
+            <div>
+              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">Disponível</p>
+              <h3 className="text-4xl font-black text-primary">
                 {status?.balance ? `$${status.balance.toFixed(2)}` : "..."}
-              </p>
+              </h3>
             </div>
-            <MiniChart data={balanceData} color="#10b981" />
+            <div className="p-3 bg-red-50 rounded-xl">
+              <DollarSign className="w-6 h-6 text-primary" />
+            </div>
+          </div>
+          <div className="mt-6 flex items-center gap-2 text-sm text-muted-foreground font-medium">
+            <Wallet className="w-4 h-4" />
+            <span>Carteira Spot Binance</span>
           </div>
         </Card>
 
-        {/* Card Trades (Com Win Rate) */}
-        <Card className="p-6 bg-card border-border flex items-center justify-between relative overflow-hidden">
-           <div className="space-y-2 z-10">
-              <p className="text-sm font-medium text-muted-foreground">Performance Hoje</p>
+        {/* Card Performance */}
+        <Card className="glass-panel p-6 flex items-center justify-between hover:border-red-300 transition-all duration-300">
+           <div className="space-y-4">
+              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider">Trades Hoje</p>
               <div className="flex items-baseline gap-2">
-                <p className="text-3xl font-bold text-foreground">{status?.dailyTrades || 0}</p>
-                <span className="text-sm text-muted-foreground">/ 5 trades</span>
+                <span className="text-5xl font-black text-foreground">{status?.dailyTrades || 0}</span>
+                <span className="text-lg font-bold text-muted-foreground">/ 10</span>
               </div>
-              <div className="flex gap-2 mt-2">
-                <Badge variant="outline" className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 gap-1">
-                  <Trophy className="w-3 h-3" /> Wins
-                </Badge>
-                <Badge variant="outline" className="bg-red-500/10 text-red-500 border-red-500/20 gap-1">
-                  <XCircle className="w-3 h-3" /> Loss
-                </Badge>
-              </div>
+              <Badge className="bg-red-100 text-red-700 hover:bg-red-200 border-none px-3 py-1 text-xs font-bold">
+                <Target className="w-3 h-3 mr-1" /> META DIÁRIA
+              </Badge>
            </div>
-           
-           {/* Gráfico de Pizza Pequeno */}
-           <div className="w-[80px] h-[80px]">
+           <div className="w-24 h-24 relative">
              <ResponsiveContainer width="100%" height="100%">
                <PieChart>
                  <Pie
                    data={winRateData.length > 0 ? winRateData : [{name: 'Empty', value: 1}]}
-                   innerRadius={25}
-                   outerRadius={35}
-                   paddingAngle={2}
+                   innerRadius={30}
+                   outerRadius={40}
                    dataKey="value"
                    stroke="none"
                  >
                    {winRateData.map((entry, index) => (
                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                    ))}
-                   {winRateData.length === 0 && <Cell fill="#334155" />}
+                   {winRateData.length === 0 && <Cell fill="#fee2e2" />}
                  </Pie>
                </PieChart>
              </ResponsiveContainer>
+             <div className="absolute inset-0 flex items-center justify-center">
+                <Activity className="w-5 h-5 text-primary opacity-50" />
+             </div>
            </div>
         </Card>
       </div>
 
-      {/* --- GRÁFICO PRINCIPAL --- */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[400px]">
-        <Card className="col-span-1 lg:col-span-3 p-6 bg-card border-border flex flex-col">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <h3 className="text-lg font-semibold text-foreground flex items-center gap-2">
-                <TrendingUp className="w-5 h-5 text-primary" />
-                Evolução do Capital (Ao Vivo)
-              </h3>
-              <p className="text-xs text-muted-foreground">Atualização a cada 2 segundos</p>
+      {/* Gráfico Principal */}
+      <Card className="glass-panel p-6 border-red-100/80 shadow-2xl shadow-red-500/10">
+        <div className="flex items-center justify-between mb-8">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center">
+              <TrendingUp className="w-5 h-5 text-primary" />
             </div>
-            <Badge variant="secondary" className="font-mono">
-              Live Feed
-            </Badge>
+            <div>
+              <h3 className="text-lg font-black text-foreground">CURVA DE CRESCIMENTO</h3>
+              <p className="text-xs font-bold text-primary animate-pulse">● ATUALIZAÇÃO EM TEMPO REAL</p>
+            </div>
           </div>
+        </div>
+        
+        <div className="h-[400px] w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={equityData}>
+              <defs>
+                <linearGradient id="colorEquity" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.2}/>
+                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(239, 68, 68, 0.1)" vertical={false} />
+              <XAxis 
+                dataKey="time" 
+                stroke="#9ca3af" 
+                fontSize={12} 
+                tickLine={false}
+                axisLine={false}
+                minTickGap={30}
+                fontWeight={500}
+              />
+              <YAxis 
+                domain={['auto', 'auto']} 
+                stroke="#9ca3af" 
+                fontSize={12} 
+                tickLine={false}
+                axisLine={false}
+                tickFormatter={(val) => `$${val}`}
+                fontWeight={500}
+              />
+              <Tooltip 
+                contentStyle={{ 
+                  backgroundColor: "rgba(255, 255, 255, 0.95)", 
+                  border: "2px solid #fee2e2", 
+                  borderRadius: "1rem", 
+                  boxShadow: "0 10px 15px -3px rgba(220, 38, 38, 0.1)",
+                  fontWeight: "bold"
+                }}
+                itemStyle={{ color: "#ef4444" }}
+                labelStyle={{ color: "#6b7280", marginBottom: "0.25rem", fontSize: "0.8rem" }}
+              />
+              <Area 
+                type="monotone" 
+                dataKey="value" 
+                stroke="#ef4444" 
+                strokeWidth={4}
+                fill="url(#colorEquity)" 
+                animationDuration={1000}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
           
-          <div className="flex-1 w-full min-h-0">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={equityData}>
-                <defs>
-                  <linearGradient id="colorEquity" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} vertical={false} />
-                <XAxis 
-                  dataKey="time" 
-                  stroke="hsl(var(--muted-foreground))" 
-                  fontSize={12} 
-                  tickLine={false}
-                  axisLine={false}
-                  minTickGap={30}
-                />
-                <YAxis 
-                  domain={['auto', 'auto']} 
-                  stroke="hsl(var(--muted-foreground))" 
-                  fontSize={12} 
-                  tickLine={false}
-                  axisLine={false}
-                  tickFormatter={(val) => `$${val}`}
-                  width={60}
-                />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: "hsl(var(--popover))", 
-                    border: "1px solid hsl(var(--border))", 
-                    borderRadius: "0.5rem",
-                    boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)"
-                  }}
-                  itemStyle={{ color: "hsl(var(--foreground))" }}
-                  labelStyle={{ color: "hsl(var(--muted-foreground))", marginBottom: "0.25rem" }}
-                />
-                <Area 
-                  type="monotone" 
-                  dataKey="value" 
-                  stroke="#3b82f6" 
-                  strokeWidth={3}
-                  fill="url(#colorEquity)" 
-                  isAnimationActive={false} // Desativa animação inicial para fluidez em tempo real
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-            
-            {equityData.length === 0 && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/50 backdrop-blur-[1px] z-10 rounded-lg">
-                <Activity className="w-10 h-10 text-muted-foreground animate-pulse mb-2" />
-                <p className="text-muted-foreground font-medium">Aguardando dados do mercado...</p>
-                <p className="text-xs text-muted-foreground mt-1">Certifique-se que o backend está rodando na porta 8000</p>
+          {equityData.length === 0 && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center z-10">
+              <div className="p-4 bg-white/80 backdrop-blur rounded-2xl border border-red-100 shadow-xl text-center">
+                <Activity className="w-8 h-8 text-primary animate-spin mb-2 mx-auto" />
+                <p className="font-bold text-foreground">Sincronizando...</p>
               </div>
-            )}
-          </div>
-        </Card>
-      </div>
+            </div>
+          )}
+        </div>
+      </Card>
     </div>
   );
 };
