@@ -3,7 +3,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ArrowUpRight, ArrowDownRight, History } from "lucide-react";
-import { api } from "@/services/api";
+import { api, TradeHistoryItem } from "@/services/api";
 
 const TradeHistory = () => {
   const { data: trades } = useQuery({
@@ -38,7 +38,7 @@ const TradeHistory = () => {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {trades?.slice().reverse().map((trade: any, idx: number) => (
+              {trades?.map((trade: TradeHistoryItem, idx: number) => (
                 <TableRow key={idx} className="border-white/5 hover:bg-white/5 transition-colors group">
                   <TableCell className="text-gray-300 font-mono text-xs">{trade.timestamp}</TableCell>
                   <TableCell>
@@ -48,7 +48,7 @@ const TradeHistory = () => {
                   </TableCell>
                   <TableCell>
                     <Badge className={trade.pnl > 0 ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30" : "bg-red-500/20 text-red-400 hover:bg-red-500/30"}>
-                      {trade.tipo || (trade.pnl > 0 ? "WIN" : "LOSS")}
+                      {trade.pnl > 0 ? "WIN" : "LOSS"}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-gray-400 font-mono">${trade.entry_price?.toFixed(2)}</TableCell>
@@ -66,7 +66,7 @@ const TradeHistory = () => {
               {(!trades || trades.length === 0) && (
                 <TableRow>
                   <TableCell colSpan={6} className="h-32 text-center text-gray-500">
-                    Nenhum registro encontrado no histórico.
+                    Nenhuma operação fechada ainda. Aguardando o Sniper.
                   </TableCell>
                 </TableRow>
               )}
