@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query"; // Importar React Query
-import { api } from "@/services/api"; // Importar API
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/services/api";
 import Dashboard from "@/components/trading/Dashboard";
 import Positions from "@/components/trading/Positions";
 import TradeHistory from "@/components/trading/TradeHistory";
 import Settings from "@/components/trading/Settings";
 import LiveLogs from "@/components/trading/LiveLogs";
-import MarketTicker from "@/components/trading/MarketTicker"; // Importar o Ticker atualizado
+import MarketTicker from "@/components/trading/MarketTicker";
 import { 
   LayoutDashboard, 
   TrendingUp, 
@@ -31,7 +31,7 @@ import {
 const Index = () => {
   const [activeView, setActiveView] = useState("dashboard");
 
-  // Buscar status aqui para alimentar o Ticker globalmente
+  // O Index busca o status apenas para atualizar o indicador "SISTEMA ONLINE" no header
   const { data: status } = useQuery({
     queryKey: ["botStatus"],
     queryFn: api.getStatus,
@@ -100,10 +100,13 @@ const Index = () => {
         <SidebarInset className="flex flex-col min-w-0 bg-transparent">
           {/* Header Fixo com Letreiro */}
           <div className="sticky top-0 z-20 flex flex-col">
-             {/* O Letreiro fica no topo absoluto */}
-             <MarketTicker prices={status?.marketPrices} />
              
-             {/* Barra de Navegação abaixo do letreiro */}
+             {/* CORREÇÃO AQUI: Removemos "prices={...}" pois o componente já busca os dados sozinho */}
+             <div className="w-full bg-black/80 backdrop-blur border-b border-white/10">
+                <MarketTicker />
+             </div>
+             
+             {/* Barra de Navegação */}
              <header className="flex h-14 items-center gap-4 px-6 border-b border-sidebar-border bg-background/80 backdrop-blur-md">
                 <SidebarTrigger className="text-foreground hover:bg-sidebar-accent" />
                 <div className="flex-1">
@@ -113,10 +116,12 @@ const Index = () => {
                 </div>
                 <div className="flex items-center gap-3 bg-card px-3 py-1.5 rounded-full border border-border shadow-sm">
                 <span className="relative flex h-2.5 w-2.5">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-primary"></span>
+                    <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${status?.isRunning ? "bg-emerald-500" : "bg-red-500"}`}></span>
+                    <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${status?.isRunning ? "bg-emerald-500" : "bg-red-500"}`}></span>
                 </span>
-                <span className="text-xs font-bold text-primary">REDE NEURAL ATIVA</span>
+                <span className={`text-xs font-bold ${status?.isRunning ? "text-emerald-500" : "text-red-500"}`}>
+                    {status?.isRunning ? "SISTEMA ONLINE" : "SISTEMA PAUSADO"}
+                </span>
                 </div>
             </header>
           </div>

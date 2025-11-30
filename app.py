@@ -15,9 +15,7 @@ from flask_cors import CORS
 # =============================================
 # ⚠️ CONFIGURAÇÃO DE RESET (NUCLEAR)
 # =============================================
-# Mude para True para FORÇAR o robô a esquecer tudo e voltar para R$ 100
-# Mude para False depois se quiser que ele lembre das operações ao reiniciar
-FORCAR_RESET_AGORA = True  
+FORCAR_RESET_AGORA = False  # Mude para True apenas se quiser zerar tudo
 
 # =============================================
 # CONFIGURAÇÕES GERAIS
@@ -38,8 +36,8 @@ PASTA_PROJETO = os.path.join(BASE_DRIVE, 'RoboTrader_Arquivos_final')
 META_DIR = os.path.join(PASTA_PROJETO, 'model_metadata')
 INTEL_DIR = os.path.join(PASTA_PROJETO, 'inteligencia_ia')
 POSITIONS_FILE = os.path.join(PASTA_PROJETO, 'positions.json')
+HISTORY_FILE = os.path.join(PASTA_PROJETO, 'history.json') # Novo arquivo para histórico
 
-# Garante que pastas existem
 os.makedirs(META_DIR, exist_ok=True)
 os.makedirs(INTEL_DIR, exist_ok=True)
 
@@ -55,11 +53,11 @@ CONFIG = {
         'GALA/USDT'
     ],
     'paper_trading': True,        
-    'initial_capital': 100.0,     # SEU CAPITAL INICIAL
+    'initial_capital': 100.0,     
     'timeframe': '1h',
     'min_confidence': 0.55,       
     'sleep_cycle': 60,            
-    'max_positions': 3,           # DIVISÃO POR 3
+    'max_positions': 3,           
     'stop_loss_mult': 2.0,        
     'take_profit_mult': 5.0       
 }
@@ -96,20 +94,25 @@ logger = FrontendLogger()
 class Carteira:
     def __init__(self):
         self.posicoes = {}
+        self.historico = [] # Novo: Guarda histórico de trades fechados
         self.cash = CONFIG['initial_capital']
         self.lock = Lock()
         
-        # --- LÓGICA DE RESET FORÇADO ---
+        self.last_event = None # Novo: Para notificação no frontend
+        self.daily_trades = 0  # Novo: Contador diário
+        
         if FORCAR_RESET_AGORA:
             logger.warning("⚠️ RESET FORÇADO ATIVADO! Apagando memória antiga...")
             self.posicoes = {}
+            self.historico = []
             self.cash = CONFIG['initial_capital']
-            self.salvar() # Sobrescreve o arquivo no disco com 100.00
+            self.salvar()
             logger.success(f"Sistema restaurado para R$ {self.cash:.2f}")
         else:
             self.carregar()
 
     def carregar(self):
+        # Carrega Posições
         if os.path.exists(POSITIONS_FILE):
             try:
                 with open(POSITIONS_FILE, 'r') as f:
@@ -118,14 +121,23 @@ class Carteira:
                     self.cash = float(data.get('cash', CONFIG['initial_capital']))
                 logger.info(f"Memória carregada. Saldo Atual: {self.cash:.2f}")
             except Exception as e:
-                logger.error(f"Erro ao carregar memória: {e}")
-        else:
-            logger.system(f"Começando do zero com R$ {CONFIG['initial_capital']:.2f}")
+                logger.error(f"Erro ao carregar posições: {e}")
+        
+        # Carrega Histórico
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, 'r') as f:
+                    self.historico = json.load(f)
+            except Exception as e:
+                logger.error(f"Erro ao carregar histórico: {e}")
 
     def salvar(self):
         try:
             with open(POSITIONS_FILE, 'w') as f:
                 json.dump({'posicoes': self.posicoes, 'cash': self.cash}, f, indent=2)
+            
+            with open(HISTORY_FILE, 'w') as f:
+                json.dump(self.historico, f, indent=2)
         except Exception as e:
             logger.error(f"Erro ao salvar: {e}")
 
@@ -143,6 +155,15 @@ class Carteira:
                 'atr': atr,
                 'timestamp': str(datetime.datetime.now())
             }
+            
+            # Evento para Frontend
+            self.last_event = {
+                'symbol': symbol,
+                'type': 'BUY',
+                'price': price
+            }
+            self.daily_trades += 1
+            
             self.salvar()
             logger.success(f"COMPRA: {symbol} | Investido: ${cost:.2f}")
             return True
@@ -155,6 +176,25 @@ class Carteira:
             revenue = pos['quantity'] * price
             profit = revenue - pos['invested']
             self.cash += revenue
+            
+            # Registra no Histórico
+            trade_record = {
+                'symbol': symbol,
+                'entry_price': pos['entry_price'],
+                'exit_price': price,
+                'pnl': profit,
+                'reason': reason,
+                'timestamp': str(datetime.datetime.now())
+            }
+            self.historico.append(trade_record)
+            
+            # Evento para Frontend
+            self.last_event = {
+                'symbol': symbol,
+                'type': 'SELL',
+                'pnl': profit
+            }
+            self.daily_trades += 1
             
             self.salvar()
             
@@ -175,6 +215,7 @@ class RoboTrader:
         self.carteira = Carteira()
         self.exchange = ccxt.binance({'enableRateLimit': True})
         self.models = {}
+        self.market_prices = {} # Novo: Armazena preços para o ticker
         self.load_models()
         logger.system(f"Estratégia: Dividir R$ {CONFIG['initial_capital']} em {CONFIG['max_positions']} posições.")
 
@@ -201,6 +242,10 @@ class RoboTrader:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=CONFIG['timeframe'], limit=100)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
+            # Atualiza preço de mercado global
+            current_close = df['close'].iloc[-1]
+            self.market_prices[symbol] = current_close
+            
             df['rsi'] = ta.rsi(df['close'], length=14)
             macd = ta.macd(df['close'])
             macd_col = [c for c in macd.columns if c.startswith('MACD_') and not c.startswith('MACDs') and not c.startswith('MACDh')]
@@ -225,11 +270,15 @@ class RoboTrader:
     def cycle(self):
         logger.info(f"--- Varredura (Vagas: {CONFIG['max_positions'] - len(self.carteira.posicoes)}) ---")
         
-        # 1. Gerencia Saídas
+        # 1. Gerencia Saídas e Atualiza Preços das Posições
         for sym in list(self.carteira.posicoes.keys()):
             try:
                 ticker = self.exchange.fetch_ticker(sym)
                 current_price = ticker['last']
+                
+                # Atualiza preço global
+                self.market_prices[sym] = current_price
+                
                 pos = self.carteira.posicoes[sym]
                 
                 stop = pos['entry_price'] - (pos['atr'] * CONFIG['stop_loss_mult'])
@@ -266,7 +315,7 @@ class RoboTrader:
                     })
             except: pass
 
-        # 4. Executa Compras (Preenchendo Vagas)
+        # 4. Executa Compras
         candidates.sort(key=lambda x: x['prob'], reverse=True)
 
         for cand in candidates:
@@ -276,14 +325,11 @@ class RoboTrader:
                 logger.warning("Saldo insuficiente para nova posição.")
                 break
 
-            # Se falta apenas 1 vaga, usa TUDO o que sobrou
             if slots_abertos == 1:
                 invest_amount = self.carteira.cash
             else:
-                # Se tem mais vagas, divide igualmente
                 invest_amount = self.carteira.cash / slots_abertos
 
-            # Margem de segurança
             invest_amount = invest_amount * 0.99
 
             if invest_amount > 5.0:
@@ -326,18 +372,46 @@ def stop():
 @app.route('/api/logs', methods=['GET'])
 def logs(): return jsonify(list(reversed(logger.buffer)))
 
+# --- NOVA ROTA: Histórico para o Gráfico de Win Rate ---
+@app.route('/api/history', methods=['GET'])
+def history():
+    return jsonify(bot.carteira.historico)
+
 @app.route('/api/status', methods=['GET'])
 def status():
-    invested = sum(p['invested'] for p in bot.carteira.posicoes.values())
-    equity = bot.carteira.cash + invested
+    # Calcula PnL não realizado para cada posição aberta
+    open_pos_data = []
+    invested_total = 0
+    
+    for sym, val in bot.carteira.posicoes.items():
+        # Pega preço atual se disponível, senão usa preço de entrada
+        curr_price = bot.market_prices.get(sym, val['entry_price'])
+        # Valor atual da posição
+        curr_val = val['quantity'] * curr_price
+        # PnL não realizado
+        unrealized_pnl = curr_val - val['invested']
+        
+        open_pos_data.append({
+            "symbol": sym, 
+            "entryPrice": val['entry_price'], 
+            "quantity": val['quantity'], 
+            "invested": val['invested'], 
+            "pnl": unrealized_pnl,
+            "currentPrice": curr_price
+        })
+        invested_total += val['invested']
+
+    equity = bot.carteira.cash + sum([(p['invested'] + p['pnl']) for p in open_pos_data])
+
     return jsonify({
         "isRunning": bot.running,
         "balance": bot.carteira.cash,
         "equity": equity,
-        "openPositions": [{
-            "symbol": k, "entryPrice": v['entry_price'], 
-            "quantity": v['quantity'], "invested": v['invested'], "pnl": 0
-        } for k,v in bot.carteira.posicoes.items()]
+        "dailyTrades": bot.carteira.daily_trades, # Adicionado
+        "totalTrades": len(bot.carteira.historico), # Adicionado
+        "marketPrices": bot.market_prices, # Adicionado para o Ticker
+        "lastEvent": bot.carteira.last_event, # Adicionado para Toast
+        "openPositions": open_pos_data
     })
 
 if __name__ == '__main__':
