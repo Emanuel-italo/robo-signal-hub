@@ -1,4 +1,3 @@
-# (arquivo completo: copie e substitua seu atual)
 # -*- coding: utf-8 -*-
 """
 VERSÃO DE PRODUÇÃO (LIVE TRADING) - UPGRADE OPÇÃO C (COM CORREÇÕES)
@@ -1120,9 +1119,16 @@ class RoboTrader:
 
         # Novas Entradas
         self.carteira._check_daily_reset()
-        if self.carteira.daily_trades >= CONFIG['max_daily_trades']:
-            logger.info("Limite diário de trades atingido", daily_trades=self.carteira.daily_trades)
-            return
+        # ---------- DAILY LIMIT DISABLED ----------
+        # A verificação de limite diário original foi removida para permitir operação 24/7.
+        # Mantemos o contador self.carteira.daily_trades para relatório/monitoramento, mas
+        # o robô NÃO irá interromper entradas por atingir um limite diário.
+        #
+        # (trecho original comentado)
+        # if self.carteira.daily_trades >= CONFIG['max_daily_trades']:
+        #     logger.info("Limite diário de trades atingido", daily_trades=self.carteira.daily_trades)
+        #     return
+        # ------------------------------------------
 
         if not allow_entries:
             return
