@@ -1,14 +1,10 @@
-# app.py
+# (arquivo completo: copie e substitua seu atual)
+# -*- coding: utf-8 -*-
 """
-VERSÃO DE PRODUÇÃO (LIVE TRADING)
-Ajustada para banca pequena (~17 USDT / R$ 100).
-INTEGRAÇÃO TOTAL COM MODELOS DE IA TREINADOS e ajuste de dimensionamento.
-Inclui:
- - EV & risk-sizing
- - limpeza de dust (min_amount)
- - registro de samples
- - proteção por drawdown
- - venda automática ao atingir lucro (LOCK PROFIT)
+VERSÃO DE PRODUÇÃO (LIVE TRADING) - UPGRADE OPÇÃO C (COM CORREÇÕES)
+Corrige:
+ - erro de precisão/min_amount ao vender (ex: DOGE)
+ - recuperação / exposição do histórico que sumiu
 """
 from __future__ import annotations
 
@@ -23,6 +19,7 @@ from functools import wraps
 from math import floor
 from threading import Lock, Thread
 from typing import Any, Dict, List, Optional
+from decimal import Decimal, ROUND_DOWN
 
 # BIBLIOTECAS EXTERNAS
 import ccxt
@@ -88,7 +85,7 @@ os.makedirs(SAMPLES_DIR, exist_ok=True)
 os.makedirs(PASTA_PROJETO, exist_ok=True)
 
 # =========================
-# CONFIGURAÇÕES (OTIMIZADAS PARA R$ 100 / 17 USDT)
+# CONFIGURAÇÕES (OTIMIZADAS PARA R$ 100 / 17 USDT) + OPÇÃO C
 # =========================
 CONFIG = {
     'groups': {
@@ -119,7 +116,7 @@ CONFIG = {
     'take_profit_mult': 5.0,
     'risk_per_trade': 0.02,    # 2% do patrimônio por trade (ajustável)
     'min_trade_usd': 5.5,      # mínimo da Binance (deixe > 5)
-    'max_daily_trades': 6,
+    'max_daily_trades': 25,
     'min_volume_quote': 5000.0,
     'slippage_pct': 0.0015,
     'fee_pct': 0.001,
@@ -129,7 +126,7 @@ CONFIG = {
     # Diversificação / Alocação
     'diversify': True,
     'allocation_mode': 'proportional',  # 'proportional' ou 'equal'
-    'allocation_buffer_pct': 0.05,  # Mantém 5% do cash como buffer para fees/ordens
+    'allocation_buffer_pct': 0.10,  # Mantém 10% do cash como buffer para fees/ordens
     'min_allocation_per_slot': 5.5,  # mesmo que min_trade_usd (segurança)
 
     # comportamento automático para "dust" (quantias menores que min_amount da exchange)
@@ -143,8 +140,6 @@ CONFIG = {
     'max_drawdown_pct': 0.20,          # se drawdown > 20% pausa entradas
 
     # VENDA AO ALCANÇAR LUCRO (LOCK PROFIT)
-    # Se o lucro não realizado (em USD) >= min_profit_usd OU lucro percentual >= min_profit_pct,
-    # o robô fechará a posição para "garantir ganho".
     'min_profit_usd': 0.10,   # padrão conservador (ajuste conforme sua preferência)
     'min_profit_pct': 0.005,  # 0.5% do capital investido na posição
 
@@ -156,6 +151,27 @@ CONFIG = {
     'circuit_breaker_seconds': 10 * 60,
     'retry_max_attempts': 3,
     'retry_backoff_base': 1.0,
+
+    # --- OPÇÃO C (NOVOS PARÂMETROS) ---
+    # Entrada escalonada (pyramiding) - frações que somam 1.0
+    'entry_steps': [0.5, 0.3, 0.2],
+    # espaçamento entre steps em múltiplos de ATR (ex.: primeiro step já, 2nd = -1.5 ATR, 3rd = -2.5 ATR)
+    'entry_step_spacing_atr': [0.0, 1.5, 2.5],
+    # trailing stop multiplier baseado em ATR
+    'trailing_atr_multiplier': 1.0,
+    # break-even: depois de X * ATR de lucro, move stop para entry (ou entry + tiny buffer)
+    'break_even_profit_atr': 1.0,
+    # take profit tiers adicionais (mantidos como Fallback se quiser modificar)
+    'take_profit_tiers': [
+        {'pct': 0.015, 'portion': 0.4},
+        {'pct': 0.03, 'portion': 0.3},
+        {'pct': 0.06, 'portion': 0.3},
+    ],
+    # Média móvel adaptativa (KAMA) params
+    'adaptive_ma': {'n': 10, 'fast': 2, 'slow': 30},
+
+    # Modelo e threshold
+    'model_prob_threshold': 0.55
 }
 
 # Mapa auxiliar Símbolo -> Grupo
@@ -307,8 +323,41 @@ def retry_on_exception(max_attempts: int = 3, base_backoff: float = 1.0):
         return wrapper
     return deco
 
+
+# ----- Técnicos: ATR e KAMA -----
+def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high = df['h']
+    low = df['l']
+    close = df['c']
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(period, min_periods=1).mean()
+    return atr
+
+
+def kaufman_adaptive_moving_average(close: pd.Series, n: int = 10, fast: int = 2, slow: int = 30) -> pd.Series:
+    close = close.copy().reset_index(drop=True)
+    n = int(n)
+    fastSC = 2 / (fast + 1)
+    slowSC = 2 / (slow + 1)
+    kama = pd.Series(index=close.index, dtype=float)
+    # inicializa com simples moving average nas primeiras janelas
+    for i in range(len(close)):
+        if i < n:
+            kama.iloc[i] = close.iloc[i]
+        else:
+            change = abs(close.iloc[i] - close.iloc[i - n])
+            volatility = close.iloc[i - n + 1:i + 1].diff().abs().sum()
+            er = 0 if volatility == 0 else change / volatility
+            sc = (er * (fastSC - slowSC) + slowSC) ** 2
+            kama.iloc[i] = kama.iloc[i - 1] + sc * (close.iloc[i] - kama.iloc[i - 1])
+    return kama
+
+
 # =========================
-# CARTEIRA
+# CARTEIRA (ATUALIZADA: suporte a adicionar steps e reduzir posição)
 # =========================
 class Carteira:
     def __init__(self, exchange, paper_trading=False):
@@ -324,9 +373,8 @@ class Carteira:
         self.load_or_init()
 
     def load_or_init(self):
-        # Em modo real, o cash será sobrescrito pela consulta à API depois
+        # Carrega estado: POSITIONS + HISTORY
         self.cash = CONFIG['initial_capital_brl']
-
         if FORCAR_RESET_AGORA:
             logger.warning("⚠️ RESET FORÇADO ATIVADO")
             self.posicoes = {}
@@ -340,26 +388,63 @@ class Carteira:
                 with open(POSITIONS_FILE, 'r') as f:
                     data = json.load(f)
                 self.posicoes = data.get('posicoes', {})
-                # Se for paper trading, recupera o cash do arquivo. Se for real, ignora (será lido da API)
                 if self.paper_trading:
                     self.cash = float(data.get('cash', self.cash))
                 self.daily_trades = int(data.get('daily_trades', 0))
-
                 last_reset_str = data.get('last_reset_day')
                 if last_reset_str:
                     self.last_reset_day = datetime.datetime.strptime(last_reset_str, "%Y-%m-%d").date()
-
                 logger.info("Estado carregado", posicoes=len(self.posicoes))
             except Exception as e:
                 logger.error("Erro ao carregar posições", error=str(e))
 
         # Carrega Histórico
+        # --- FIX: se history.json não existir ou estiver vazio, tenta recuperar do log JSONL (bot_log.jsonl)
+        loaded_hist = False
         if os.path.exists(HISTORY_FILE):
             try:
                 with open(HISTORY_FILE, 'r') as f:
                     self.historico = json.load(f)
+                loaded_hist = True
             except Exception:
-                pass
+                self.historico = []
+        if not loaded_hist:
+            # tenta recuperar do LOG_FILE (jsonl) para reconstruir vendas recentes
+            if os.path.exists(LOG_FILE):
+                try:
+                    recovered = []
+                    with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                j = json.loads(line)
+                                msg = str(j.get('message', '')).upper()
+                                # heurística: encontrar mensagens de VENDA / SELL / DUST_CLEANED
+                                if any(k in msg for k in ('VENDA', 'SELL', 'DUST_CLEANED', 'DUST')):
+                                    # tenta recuperar campos extras com pnl/symbol/qty se existirem
+                                    symbol = j.get('symbol') or j.get('extra', {}).get('symbol') or None
+                                    pnl = j.get('pnl') or j.get('extra', {}).get('pnl') or None
+                                    # cria registro parcial simples
+                                    rec = {
+                                        'symbol': symbol,
+                                        'entry_price': None,
+                                        'exit_price': None,
+                                        'quantity': None,
+                                        'pnl': pnl,
+                                        'reason': msg,
+                                        'timestamp': j.get('timestamp')
+                                    }
+                                    recovered.append(rec)
+                            except Exception:
+                                continue
+                    if recovered:
+                        # adiciona no histórico (no topo)
+                        self.historico.extend(recovered)
+                        logger.info("Histórico recuperado do log (heurístico)", recovered=len(recovered))
+                except Exception:
+                    pass
 
     def salvar(self):
         try:
@@ -370,8 +455,12 @@ class Carteira:
                     'last_reset_day': self.last_reset_day.isoformat(),
                     'daily_trades': self.daily_trades
                 }, f, indent=2, default=str)
-            with open(HISTORY_FILE, 'w') as f:
-                json.dump(self.historico, f, indent=2, default=str)
+            # --- FIX: garantir escrita consistente do histórico (append-safe)
+            try:
+                with open(HISTORY_FILE, 'w') as f:
+                    json.dump(self.historico, f, indent=2, default=str)
+            except Exception as e:
+                logger.error("Erro ao salvar history.json", error=str(e))
         except Exception as e:
             logger.error("Erro ao salvar dados", error=str(e))
 
@@ -384,34 +473,32 @@ class Carteira:
             self.salvar()
 
     def sync_balance(self):
-        """Sincroniza saldo com a Binance (Apenas Modo Real)"""
         if self.paper_trading:
             return
         try:
             balance = self.exchange.fetch_balance()
-            # Segurança: verifique existência de keys
             usdt_free = 0.0
             if isinstance(balance, dict):
-                # estrutura típica: {'USDT': {'free': 1.0, ...}, 'total': {...}}
-                if 'USDT' in balance and isinstance(balance['USDT'], dict) and 'free' in balance['USDT']:
+                try:
                     usdt_free = float(balance['USDT']['free'])
-                elif 'free' in balance:
-                    # ccxt tem variações
-                    try:
-                        usdt_free = float(balance['free'].get('USDT', 0.0))
-                    except Exception:
-                        usdt_free = 0.0
+                except Exception:
+                    usdt_free = 0.0
             self.cash = usdt_free
         except Exception as e:
             logger.error("Erro ao sincronizar saldo", error=str(e))
 
-    def abrir_posicao(self, symbol, entry_price, quantity, atr, stop_price=None, take_price=None):
+    # Execução da compra de mercado (usada tanto por abrir_posicao quanto por adicionar step)
+    def _execute_market_buy(self, symbol, quantity):
+        if self.paper_trading:
+            return {'filled': quantity, 'average': None}
+        order = self.exchange.create_order(symbol, 'market', 'buy', quantity)
+        return order
+
+    def abrir_posicao(self, symbol, entry_price, quantity, atr, stop_price=None, take_price=None, entry_plan: Optional[List[Dict]] = None):
         with self.lock:
             self._check_daily_reset()
-
             cost = float(entry_price) * float(quantity)
 
-            # Validação Extra de Saldo (Dupla checagem)
             if not self.paper_trading:
                 self.sync_balance()
 
@@ -419,51 +506,251 @@ class Carteira:
                 logger.warning("Saldo insuficiente para operação", symbol=symbol, cost=round(cost, 4), cash=round(self.cash, 4))
                 return False
 
-            # Execução da Ordem
+            # Executa ordem de mercado real (ou simula em paper)
             if not self.paper_trading:
                 try:
-                    # Tenta criar ordem de MERCADO na Binance
-                    order = self.exchange.create_order(symbol, 'market', 'buy', quantity)
-                    # Atualiza preço e qtd com o que foi realmente executado
-                    entry_price = float(order.get('average') or order.get('price') or entry_price)
-                    # Re-sincroniza saldo após compra
+                    order = self._execute_market_buy(symbol, quantity)
+                    exec_qty = float(order.get('filled') or order.get('amount') or quantity)
+                    executed_price = float(order.get('average') or entry_price)
+                    # pequeno sleep para sincronizar
                     time.sleep(1)
                     self.sync_balance()
                 except Exception as e:
                     logger.error("ERRO CRÍTICO AO COMPRAR NA BINANCE", symbol=symbol, error=str(e))
                     return False
             else:
-                # Paper trading: atualiza cash localmente
+                exec_qty = float(quantity)
+                executed_price = float(entry_price)
                 self.cash -= cost
 
-            self.posicoes[symbol] = {
-                'entry_price': float(entry_price),
-                'quantity': float(quantity),
-                'invested': float(entry_price * quantity),
+            # cria posição local com metadados para gestão (inclui entry_plan para steps restantes)
+            pos = {
+                'entry_price': float(executed_price),
+                'quantity': float(exec_qty),
+                'invested': float(executed_price * exec_qty),
                 'atr': float(atr),
                 'stop_price': float(stop_price) if stop_price else None,
                 'take_price': float(take_price) if take_price else None,
                 'trail_stop': None,
                 'timestamp': str(datetime.datetime.now()),
+                'entry_plan': entry_plan or [],  # lista de pending steps
+                'tp_executed': [],  # lista de tiers executadas
                 'cooldown_until': None
             }
 
-            self.last_event = {'symbol': symbol, 'type': 'BUY', 'price': entry_price, 'qty': quantity}
+            self.posicoes[symbol] = pos
+            self.last_event = {'symbol': symbol, 'type': 'BUY', 'price': executed_price, 'qty': exec_qty}
             self.daily_trades += 1
             self.salvar()
-            logger.success("COMPRA Executada", symbol=symbol, price=round(entry_price, 6), qty=round(quantity, 6))
+            logger.success("COMPRA Executada", symbol=symbol, price=round(executed_price, 6), qty=round(exec_qty, 6))
             return True
 
-    # --- helpers para min_amount / precision (necessário para evitar erros de dust) ---
+    def add_to_position(self, symbol, add_price, add_qty, atr):
+        """Adiciona (pyramiding) à posição existente: executa market buy e atualiza posição local.
+        Retorna True se bem-sucedido; False caso contrário.
+        """
+        with self.lock:
+            if symbol not in self.posicoes:
+                return False
+            pos = self.posicoes[symbol]
+            if not self.paper_trading:
+                try:
+                    order = self._execute_market_buy(symbol, add_qty)
+                    filled = float(order.get('filled') or order.get('amount') or add_qty)
+                    avg_price = float(order.get('average') or add_price)
+                    time.sleep(1)
+                    self.sync_balance()
+                except Exception as e:
+                    logger.error("Erro ao adicionar posição (API)", symbol=symbol, error=str(e))
+                    return False
+            else:
+                filled = add_qty
+                avg_price = add_price
+                self.cash -= (avg_price * filled)
+
+            # recalcula entry_price ponderado
+            prev_qty = pos.get('quantity', 0.0)
+            prev_invested = pos.get('invested', 0.0)
+            new_qty = prev_qty + filled
+            new_invested = prev_invested + (avg_price * filled)
+            pos['quantity'] = float(new_qty)
+            pos['invested'] = float(new_invested)
+            pos['entry_price'] = float(new_invested / new_qty) if new_qty > 0 else pos['entry_price']
+            # atualiza ATR com média simples (pode ser refinado)
+            pos['atr'] = float((pos.get('atr', 0.0) + atr) / 2.0)
+            pos['timestamp'] = str(datetime.datetime.now())
+            self.posicoes[symbol] = pos
+            self.salvar()
+            logger.info("Step de entrada adicionado", symbol=symbol, added_qty=filled, new_qty=new_qty)
+            return True
+
+    # --- FIX: melhorar tratamento de precision/min_amount antes de vender ---
+    def reduzir_posicao(self, symbol, qty_to_sell, exit_price, reason="TP"):
+        """Vende uma fração da posição (market sell) e atualiza pos local. Retorna record do fechamento parcial/completo.
+        """
+        with self.lock:
+            self._check_daily_reset()
+            if symbol not in self.posicoes:
+                return None
+            pos = self.posicoes[symbol]
+            quantity = float(pos.get('quantity', 0.0))
+            if qty_to_sell <= 0 or quantity <= 0:
+                return None
+
+            sell_qty = min(qty_to_sell, quantity)
+
+            if not self.paper_trading:
+                try:
+                    # consulta saldo disponível
+                    base_asset = symbol.split('/')[0]
+                    bal = {}
+                    try:
+                        bal = self.exchange.fetch_balance()
+                    except Exception:
+                        pass
+                    available_base = 0.0
+                    if isinstance(bal, dict):
+                        if base_asset in bal and isinstance(bal[base_asset], dict):
+                            available_base = float(bal[base_asset].get('free', 0.0) or 0.0)
+                        elif 'free' in bal and isinstance(bal['free'], dict):
+                            available_base = float(bal['free'].get(base_asset, 0.0) or 0.0)
+
+                    qty_to_attempt = min(sell_qty, available_base)
+
+                    # small epsilon
+                    epsilon = 1e-12
+                    qty_to_attempt = max(0.0, qty_to_attempt - epsilon)
+
+                    if qty_to_attempt <= 0:
+                        logger.error("Saldo em ativo base insuficiente para vender (redução)", symbol=symbol, needed=sell_qty, available=available_base)
+                        return None
+
+                    # --- FIX: obter min_amount e amount_precision do mercado ---
+                    min_amount, amount_precision = self._get_market_limits_and_precision(symbol)
+                    # se exchange oferece helper, prioriza
+                    try:
+                        if hasattr(self.exchange, 'amount_to_precision'):
+                            # amount_to_precision pode levantar erro para quantias menores que precision/limits
+                            qp = self.exchange.amount_to_precision(symbol, qty_to_attempt)
+                            qty_to_attempt = float(qp)
+                        else:
+                            # se tiver amount_precision, aplica floor para essa precisão
+                            if amount_precision is not None:
+                                # amount_precision é número de casas decimais no amount (ex: 1 => integers)
+                                step = Decimal('1').scaleb(-amount_precision)  # 10**(-amount_precision)
+                                dqty = Decimal(str(qty_to_attempt))
+                                floored = (dqty // step) * step
+                                qty_to_attempt = float(floored.quantize(step, rounding=ROUND_DOWN))
+                    except Exception:
+                        # se amount_to_precision falhar, aplicamos fallback manual
+                        if amount_precision is not None:
+                            step = Decimal('1').scaleb(-amount_precision)
+                            dqty = Decimal(str(qty_to_attempt))
+                            floored = (dqty // step) * step
+                            qty_to_attempt = float(floored.quantize(step, rounding=ROUND_DOWN))
+
+                    # Rechecar min_amount
+                    if min_amount is None:
+                        # fallback conservador
+                        min_amount = 1e-8
+                    if qty_to_attempt < (min_amount - 1e-12):
+                        # quantidade ajustada ficou menor que min_amount -> DECISÃO
+                        if CONFIG.get('auto_clean_dust', True):
+                            # limpamos localmente (dust)
+                            logger.warning("Quantidade ajustada menor que min_amount - limpando posição local (DUST_CLEANED)",
+                                           symbol=symbol, qty_available=available_base, min_amount=min_amount)
+                            record = {
+                                'symbol': symbol,
+                                'entry_price': pos.get('entry_price'),
+                                'exit_price': exit_price,
+                                'quantity': float(qty_to_attempt),
+                                'pnl': 0.0,
+                                'reason': reason + " (DUST_CLEANED)",
+                                'timestamp': str(datetime.datetime.now())
+                            }
+                            # remove posição local
+                            self.posicoes.pop(symbol, None)
+                            self.historico.append(record)
+                            self.last_event = {'symbol': symbol, 'type': 'DUST_CLEANED', 'reason': reason}
+                            self.daily_trades += 0
+                            self.salvar()
+                            logger.info("Posição removida localmente por ser pó (dust).", symbol=symbol, qty_removed=available_base)
+                            return record
+                        else:
+                            logger.error("Quantidade ajustada < min_amount — pular venda", symbol=symbol, available=available_base, min_amount=min_amount)
+                            return None
+
+                    # final: cria ordem de venda de mercado com qty_to_attempt
+                    order = self.exchange.create_order(symbol, 'market', 'sell', qty_to_attempt)
+                    executed_qty = float(order.get('filled') or order.get('amount') or qty_to_attempt)
+                    real_exit_price = float(order.get('average') if order.get('average') else exit_price)
+
+                    time.sleep(1)
+                    self.sync_balance()
+                except Exception as e:
+                    # --- FIX: registrar mensagem mais detalhada (mantendo formato anterior) ---
+                    logger.error("ERRO CRÍTICO AO VENDER NA BINANCE (redução)", symbol=symbol, error=str(e))
+                    return None
+            else:
+                executed_qty = float(sell_qty)
+                real_exit_price = float(exit_price)
+                self.cash += (real_exit_price * executed_qty)
+
+            # atualiza posição local
+            remaining_qty = max(0.0, quantity - executed_qty)
+            revenue = real_exit_price * executed_qty
+            pnl = revenue - (pos.get('entry_price', 0.0) * executed_qty)
+
+            # registra histórico da parte vendida
+            record = {
+                'symbol': symbol,
+                'entry_price': pos.get('entry_price'),
+                'exit_price': real_exit_price,
+                'quantity': executed_qty,
+                'pnl': pnl,
+                'reason': reason,
+                'timestamp': str(datetime.datetime.now())
+            }
+            # Append ao histórico e salva
+            self.historico.append(record)
+            self.last_event = {'symbol': symbol, 'type': 'SELL_PARTIAL' if remaining_qty > 0 else 'SELL', 'pnl': pnl, 'reason': reason}
+            self.daily_trades += 1
+
+            if remaining_qty > 0:
+                pos['quantity'] = float(remaining_qty)
+                pos['invested'] = float(pos.get('entry_price', 0.0) * remaining_qty)
+                self.posicoes[symbol] = pos
+                self.salvar()
+                logger.warning("Venda parcial executada; posição atualizada", symbol=symbol, sold=executed_qty, remaining=remaining_qty)
+            else:
+                # posição fechada completamente
+                self.posicoes.pop(symbol, None)
+                self.salvar()
+                log_func = logger.success if pnl > 0 else logger.warning
+                log_func(f"VENDA ({'Lucro' if pnl > 0 else 'Prejuízo'})", symbol=symbol, pnl=f"${pnl:.2f}", reason=reason)
+
+            # salva sample para aprendizado
+            try:
+                features = {
+                    'entry_price': pos.get('entry_price'),
+                    'exit_price': real_exit_price,
+                    'atr': pos.get('atr'),
+                    'quantity': executed_qty,
+                    'reason': reason
+                }
+                self._save_sample(symbol, features, 1 if pnl > 0 else 0)
+            except Exception:
+                pass
+
+            return record
+
+    # ----- helpers para min_amount / precision (necessário para evitar erros de dust) -----
     def _ensure_markets_loaded(self):
-        """Try to ensure the exchange has markets loaded so we can read limits/precision."""
         try:
             if hasattr(self.exchange, 'markets') and not self.exchange.markets:
-                # load_markets pode ser caro, mas é necessário para min_amount/precision
                 try:
                     self.exchange.load_markets(True)
                 except Exception:
-                    # algumas builds do ccxt aceitam load_markets sem argumentos
                     try:
                         self.exchange.load_markets()
                     except Exception:
@@ -472,43 +759,29 @@ class Carteira:
             pass
 
     def _get_market_limits_and_precision(self, symbol):
-        """
-        Retorna (min_amount, amount_precision) para o symbol, se possível.
-        Se não for possível, retorna (None, None) para que o caller use fallback.
-        """
         try:
             self._ensure_markets_loaded()
             markets = getattr(self.exchange, 'markets', None) or {}
-            market = markets.get(symbol) or markets.get(symbol.replace('/', ''))  # fallback
+            market = markets.get(symbol) or markets.get(symbol.replace('/', ''))
             if market:
-                # min amount
                 limits = market.get('limits', {}) or {}
                 amount_limits = limits.get('amount') or {}
                 min_amount = amount_limits.get('min')
-                # precision
                 precision = market.get('precision', {}) or {}
                 amount_precision = precision.get('amount')
-                # tipo conversão seguras
                 if min_amount is not None:
                     min_amount = float(min_amount)
                 if amount_precision is not None:
                     try:
                         amount_precision = int(amount_precision)
                     except Exception:
-                        # se precision estiver em float, converte truncando
                         amount_precision = int(float(amount_precision))
                 return min_amount, amount_precision
         except Exception:
             pass
         return None, None
 
-    # --- registro de amostras (features + label) para posterior retrain / partial_fit ---
     def _save_sample(self, symbol: str, features: Dict[str, Any], label: int):
-        """
-        Salva cada sample como JSONL em SAMPLES_DIR/symbol_samples.jsonl
-        features: dicionário
-        label: 0 ou 1
-        """
         try:
             path = os.path.join(SAMPLES_DIR, f"{symbol.replace('/', '_')}_samples.jsonl")
             with open(path, 'a', encoding='utf-8') as f:
@@ -516,245 +789,6 @@ class Carteira:
         except Exception:
             pass
 
-    def fechar_posicao(self, symbol, exit_price, reason="Sinal"):
-        """
-        Fechamento robusto:
-         - verifica saldo disponível do ativo base (ex: SOL)
-         - ajusta quantidade pela precisão da exchange
-         - tenta venda parcial se saldo insuficiente
-         - re-adiciona posição local em caso de falha
-         - se quantidade disponível < min_amount da exchange e CONFIG['auto_clean_dust'] == True,
-           limpa a posição localmente (registro no histórico) para evitar loops de erro.
-        """
-        with self.lock:
-            self._check_daily_reset()
-
-            if symbol not in self.posicoes:
-                return None
-
-            pos = self.posicoes.pop(symbol)
-            quantity = float(pos.get('quantity', 0.0))
-
-            # Guarda snapshot antes de tentar vender
-            pos_snapshot = pos.copy()
-
-            # Execução da Ordem
-            real_exit_price = exit_price
-
-            if not self.paper_trading:
-                try:
-                    # 1) consulta saldo disponível do ativo base (ex: 'SOL')
-                    base_asset = symbol.split('/')[0]
-                    try:
-                        bal = self.exchange.fetch_balance()
-                    except Exception as e:
-                        bal = {}
-                    available_base = 0.0
-                    if isinstance(bal, dict):
-                        if base_asset in bal and isinstance(bal[base_asset], dict):
-                            available_base = float(bal[base_asset].get('free', 0.0) or 0.0)
-                        elif 'free' in bal and isinstance(bal['free'], dict):
-                            available_base = float(bal['free'].get(base_asset, 0.0) or 0.0)
-
-                    # se disponível for muito menor, tentamos vender o que existe
-                    qty_to_sell = min(quantity, available_base)
-
-                    # pequena margem de segurança antes de enviar (evita erro de "insufficient balance")
-                    epsilon = 1e-12
-                    qty_to_sell = max(0.0, qty_to_sell - epsilon)
-
-                    # Obtém min_amount e precision do market via load_markets (fallback se não disponível)
-                    min_amount, amount_precision = self._get_market_limits_and_precision(symbol)
-
-                    # Se o exchange não informou min_amount, usa fallback conservador (ex.: 1e-8)
-                    if min_amount is None:
-                        # fallback prático (isso evita crash quando fetch de markets falha)
-                        min_amount = 1e-8
-
-                    # Ajusta quantidade para a precisão suportada pela exchange (se disponível)
-                    if qty_to_sell > 0:
-                        try:
-                            if hasattr(self.exchange, 'amount_to_precision'):
-                                qty_to_sell = float(self.exchange.amount_to_precision(symbol, qty_to_sell))
-                            else:
-                                # fallback: arredonda pela precision se informada
-                                if amount_precision is not None:
-                                    qty_to_sell = float(round(qty_to_sell, amount_precision))
-                        except Exception:
-                            # se falhar, segue com qty_to_sell original
-                            pass
-
-                    # Verifica se a quantidade ajustada atende ao min_amount
-                    if qty_to_sell < min_amount:
-                        # A quantidade disponível na exchange é inferior ao mínimo aceito.
-                        # Duas opções: tentar limpar localmente (auto_clean_dust) ou manter a posição para tentar no futuro.
-                        if CONFIG.get('auto_clean_dust', True):
-                            # Limpa a posição localmente (não tentamos vender; registra como 'DUST_CLEANED')
-                            logger.warning("Quantidade disponível menor que min_amount da exchange - limpando posição local (DUST)",
-                                           symbol=symbol, qty_available=available_base, min_amount=min_amount)
-                            # registra no histórico como limpeza de pó (dust)
-                            record = {
-                                'symbol': symbol,
-                                'entry_price': pos.get('entry_price'),
-                                'exit_price': real_exit_price,
-                                'quantity': float(qty_to_sell),
-                                'pnl': 0.0,
-                                'reason': reason + " (DUST_CLEANED)",
-                                'timestamp': str(datetime.datetime.now())
-                            }
-                            self.historico.append(record)
-                            self.last_event = {'symbol': symbol, 'type': 'DUST_CLEANED', 'reason': reason}
-                            self.daily_trades += 0  # opcional: não conta como trade
-                            self.salvar()
-                            logger.info("Posição removida localmente por ser pó (dust).", symbol=symbol, qty_removed=available_base)
-                            return record
-                        else:
-                            # Mantém a posição local e retorna None (comportamento antigo)
-                            logger.error("Saldo em ativo base menor que min_amount — pular venda", symbol=symbol,
-                                         available=available_base, min_amount=min_amount)
-                            self.posicoes[symbol] = pos_snapshot
-                            return None
-
-                    if qty_to_sell <= 0:
-                        # Não há saldo para vender -> re-coloca posição e retorna erro
-                        logger.error("Saldo em ativo base insuficiente para vender", symbol=symbol, needed=quantity, available=available_base)
-                        self.posicoes[symbol] = pos_snapshot
-                        return None
-
-                    # 2) cria ordem de venda de mercado
-                    order = self.exchange.create_order(symbol, 'market', 'sell', qty_to_sell)
-
-                    # 3) interpreta ordem executada
-                    executed_qty = 0.0
-                    if isinstance(order, dict):
-                        # CCXT -> alguns campos possíveis: 'filled', 'amount', 'remaining'
-                        executed_qty = float(order.get('filled') or order.get('amount') or qty_to_sell)
-                        real_exit_price = float(order.get('average') if order.get('average') else exit_price)
-
-                    # Re-sincroniza saldo (importante)
-                    time.sleep(1)
-                    self.sync_balance()
-
-                    # 4) se venda parcial (executed_qty < quantity), atualiza posição remanescente
-                    if executed_qty < (quantity - 1e-12):
-                        remaining_qty = max(0.0, quantity - executed_qty)
-                        # atualiza posição local com o que restou
-                        pos_snapshot['quantity'] = float(remaining_qty)
-                        pos_snapshot['invested'] = float(pos_snapshot.get('entry_price', 0.0) * remaining_qty)
-                        # Mantém stop/take originais para remanescente (opcional: você pode recalcular)
-                        self.posicoes[symbol] = pos_snapshot
-
-                        # registra histórico parcial (apenas a parte vendida)
-                        revenue = real_exit_price * executed_qty
-                        pnl = revenue - (pos.get('entry_price', 0.0) * executed_qty)
-                        record = {
-                            'symbol': symbol,
-                            'entry_price': pos.get('entry_price'),
-                            'exit_price': real_exit_price,
-                            'quantity': executed_qty,
-                            'pnl': pnl,
-                            'reason': reason + " (PARCIAL)",
-                            'timestamp': str(datetime.datetime.now())
-                        }
-                        self.historico.append(record)
-                        self.last_event = {'symbol': symbol, 'type': 'SELL_PARTIAL', 'pnl': pnl, 'reason': reason}
-                        self.daily_trades += 1
-                        self.salvar()
-                        logger.warning("Venda parcial executada; posição atualizada", symbol=symbol, sold=executed_qty, remaining=remaining_qty)
-                        # salva sample para aprendizado
-                        try:
-                            features = {
-                                'entry_price': pos.get('entry_price'),
-                                'exit_price': real_exit_price,
-                                'atr': pos.get('atr'),
-                                'quantity': executed_qty,
-                                'reason': reason
-                            }
-                            self._save_sample(symbol, features, 1 if pnl > 0 else 0)
-                        except Exception:
-                            pass
-                        return record
-                    else:
-                        # Venda completa
-                        revenue = real_exit_price * executed_qty
-                        pnl = revenue - pos.get('invested', 0.0)
-
-                        record = {
-                            'symbol': symbol,
-                            'entry_price': pos.get('entry_price'),
-                            'exit_price': real_exit_price,
-                            'quantity': executed_qty,
-                            'pnl': pnl,
-                            'reason': reason,
-                            'timestamp': str(datetime.datetime.now())
-                        }
-
-                        self.historico.append(record)
-                        self.last_event = {'symbol': symbol, 'type': 'SELL', 'pnl': pnl, 'reason': reason}
-                        self.daily_trades += 1
-                        self.salvar()
-                        log_func = logger.success if pnl > 0 else logger.warning
-                        log_func(f"VENDA ({'Lucro' if pnl > 0 else 'Prejuízo'})", symbol=symbol, pnl=f"${pnl:.2f}", reason=reason)
-
-                        # salva sample para aprendizado (features simples; seu pipeline pode enriquecer)
-                        try:
-                            features = {
-                                'entry_price': pos.get('entry_price'),
-                                'exit_price': real_exit_price,
-                                'atr': pos.get('atr'),
-                                'quantity': executed_qty,
-                                'reason': reason
-                            }
-                            self._save_sample(symbol, features, 1 if pnl > 0 else 0)
-                        except Exception:
-                            pass
-
-                        return record
-
-                except Exception as e:
-                    logger.error("ERRO CRÍTICO AO VENDER NA BINANCE", symbol=symbol, error=str(e))
-                    # Se falhar a venda na API, recoloca na lista local para tentar depois
-                    self.posicoes[symbol] = pos_snapshot
-                    return None
-            else:
-                # paper trading: simula venda completa
-                real_exit_price = exit_price
-                self.cash += (real_exit_price * quantity)
-                revenue = real_exit_price * quantity
-                pnl = revenue - pos.get('invested', 0.0)
-
-                record = {
-                    'symbol': symbol,
-                    'entry_price': pos.get('entry_price'),
-                    'exit_price': real_exit_price,
-                    'quantity': quantity,
-                    'pnl': pnl,
-                    'reason': reason,
-                    'timestamp': str(datetime.datetime.now())
-                }
-
-                self.historico.append(record)
-                self.last_event = {'symbol': symbol, 'type': 'SELL', 'pnl': pnl, 'reason': reason}
-                self.daily_trades += 1
-                self.salvar()
-
-                log_func = logger.success if pnl > 0 else logger.warning
-                log_func(f"VENDA (PAPER) ({'Lucro' if pnl > 0 else 'Prejuízo'})", symbol=symbol, pnl=f"${pnl:.2f}", reason=reason)
-
-                # salva sample
-                try:
-                    features = {
-                        'entry_price': pos.get('entry_price'),
-                        'exit_price': real_exit_price,
-                        'atr': pos.get('atr'),
-                        'quantity': quantity,
-                        'reason': reason
-                    }
-                    self._save_sample(symbol, features, 1 if pnl > 0 else 0)
-                except Exception:
-                    pass
-
-                return record
 
 # =========================
 # METRICS
@@ -793,7 +827,7 @@ class Metrics:
 metrics = Metrics()
 
 # =========================
-# ROBOTRADER (Cérebro)
+# ROBOTRADER (Cérebro) - INCLUI OPÇÃO C
 # =========================
 class RoboTrader:
     def __init__(self):
@@ -823,7 +857,6 @@ class RoboTrader:
                     'enableRateLimit': True,
                     'options': {'defaultType': 'spot'}
                 })
-                # Teste de conexão e leitura de saldo inicial
                 balance = self.exchange.fetch_balance()
                 free_usdt = 0.0
                 if isinstance(balance, dict):
@@ -839,17 +872,13 @@ class RoboTrader:
             self.exchange = ccxt.binance({'enableRateLimit': True})
             logger.system("Modo Paper Trading (Simulação)")
 
-        # --- CARREGA MARKETS PARA PERMITIR VALIDAÇÕES (min_amount / precision)
         try:
-            # força load local de markets para usar informações: markets[symbol]['limits'], ['precision']
             self.exchange.load_markets(True)
         except Exception:
-            # se falhar, o resto do código ainda funciona com fallback
             logger.warning("Falha ao carregar markets da exchange (continuando com fallback)")
 
         self.carteira = Carteira(self.exchange, paper_trading=CONFIG['paper_trading'])
 
-        # Sincronia inicial forçada
         if not CONFIG['paper_trading']:
             self.carteira.sync_balance()
 
@@ -879,7 +908,6 @@ class RoboTrader:
                     loaded = joblib.load(model_path)
                     meta = json.load(open(meta_path))
                     supports_partial = False
-                    # detect partial_fit support
                     if SKLEARN_AVAILABLE and hasattr(loaded, 'partial_fit'):
                         supports_partial = True
                     self.models[sym] = {
@@ -894,7 +922,6 @@ class RoboTrader:
 
     @retry_on_exception(max_attempts=3)
     def safe_fetch_data(self, symbol, limit=200):
-        # Aumentado o limite para 200 para garantir dados suficientes para EMA50 e MACD
         ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=CONFIG['timeframe'], limit=limit)
         df = pd.DataFrame(ohlcv, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         return df
@@ -903,10 +930,10 @@ class RoboTrader:
     def safe_ticker(self, symbol):
         return self.exchange.fetch_ticker(symbol)
 
-    # FUNÇÃO ANALYZE COMPLETA (Gera todas as features para a IA)
+    # FUNÇÃO ANALYZE COMPLETA (Gera todas as features para a IA) - agora inclui KAMA
     def analyze(self, symbol):
         try:
-            df = self.safe_fetch_data(symbol, limit=200)  # Requisita mais dados
+            df = self.safe_fetch_data(symbol, limit=200)
             if df is None or df.empty:
                 return None
 
@@ -922,28 +949,26 @@ class RoboTrader:
             df['ema50'] = ta.ema(df['c'], length=50)
             df['atr'] = ta.atr(df['h'], df['l'], df['c'], length=14)
 
+            # 1.b KAMA (Média Adaptativa)
+            ama_params = CONFIG.get('adaptive_ma', {'n': 10, 'fast': 2, 'slow': 30})
+            try:
+                kama_ser = kaufman_adaptive_moving_average(df['c'], n=ama_params.get('n', 10), fast=ama_params.get('fast', 2), slow=ama_params.get('slow', 30))
+                df['kama'] = kama_ser
+            except Exception:
+                df['kama'] = df['c'].rolling(10, min_periods=1).mean()
+
             # 2. FEATURES PARA O MODELO (Conforme seus meta.json)
-
-            # rsi_norm
             df['rsi_norm'] = df['rsi'] / 100.0
-
-            # dist_ema
             df['dist_ema'] = (df['c'] - df['ema50']) / df['ema50']
-
-            # macd
             macd = ta.macd(df['c'])
             if isinstance(macd, pd.DataFrame) and 'MACD_12_26_9' in macd.columns:
                 df['macd'] = macd['MACD_12_26_9']
             else:
                 df['macd'] = 0.0
-
-            # dist_bb_up
             bb = ta.bbands(df['c'], length=20, std=2)
             bbu_col = [c for c in bb.columns if 'BBU' in c]
             df['bb_upper'] = bb[bbu_col[0]] if bbu_col else df['c']
             df['dist_bb_up'] = (df['bb_upper'] - df['c']) / df['c']
-
-            # vol_change (usa coluna 'v' do OHLCV)
             df['vol_change'] = df['v'].pct_change().fillna(0.0)
 
             row = df.iloc[-1].to_dict()
@@ -953,7 +978,6 @@ class RoboTrader:
             return None
 
     def _compute_drawdown(self, equity_value: float):
-        """Atualiza high-water mark e retorna drawdown percentual (0..1)."""
         if equity_value > self.equity_high:
             self.equity_high = equity_value
         if self.equity_high <= 0:
@@ -962,32 +986,41 @@ class RoboTrader:
         return drawdown
 
     def _expected_value_per_unit(self, p_win: float, atr: float):
-        """
-        Calcula EV (em USD por unidade) usando ATR-based stop/take.
-        EV = p*win_amount - (1-p)*loss_amount
-        Onde win_amount = take_profit_mult * atr (USD por unit), loss_amount = stop_loss_mult * atr.
-        """
         win_amount = CONFIG['take_profit_mult'] * atr
         loss_amount = CONFIG['stop_loss_mult'] * atr
         ev = p_win * win_amount - (1 - p_win) * loss_amount
         return ev, win_amount, loss_amount
 
+    # ---- helper: cria plano de entrada escalonada (entry ladder)
+    def _plan_entry_ladder(self, price: float, atr: float, total_allocation_usd: float) -> List[Dict[str, Any]]:
+        steps = CONFIG.get('entry_steps', [0.5, 0.3, 0.2])
+        spacing = CONFIG.get('entry_step_spacing_atr', [0.0, 1.5, 2.5])
+        # garante o mesmo tamanho
+        if len(spacing) < len(steps):
+            # estende com últimos valores
+            spacing = spacing + [spacing[-1]] * (len(steps) - len(spacing))
+
+        plan = []
+        for frac, sp in zip(steps, spacing):
+            step_alloc = total_allocation_usd * frac
+            step_price = max(0.0, price - (sp * atr))
+            qty = step_alloc / step_price if step_price > 0 else 0.0
+            plan.append({'price_level': step_price, 'portion': frac, 'alloc_usd': step_alloc, 'qty': qty, 'done': False})
+        return plan
+
     def cycle(self):
-        # Ciclo principal: gestão de posições + entradas
         try:
             logger.info(f"--- Ciclo iniciado (Cash: {round(self.carteira.cash,4)} USDT) ---")
         except Exception:
             logger.info("--- Ciclo iniciado ---")
 
-        # 1. Atualiza equity estimada
+        # Atualiza equity
         invested_val = 0.0
         for sym, pos in self.carteira.posicoes.items():
             curr_price = self.market_prices.get(sym, pos['entry_price'])
             invested_val += (pos['quantity'] * curr_price)
 
         total_equity = self.carteira.cash + invested_val
-
-        # atualiza drawdown e histórico de equity
         drawdown = self._compute_drawdown(total_equity)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         ts_now = now_utc.strftime('%H:%M:%S')
@@ -997,12 +1030,11 @@ class RoboTrader:
 
         if drawdown >= CONFIG.get('max_drawdown_pct', 0.99):
             logger.warning("Pausando novas entradas: drawdown crítico atingido", drawdown=drawdown)
-            # Ainda permite gerenciar / fechar posições existentes, mas não abre novas
             allow_entries = False
         else:
             allow_entries = True
 
-        # 2. Gerenciar Posições (fechamentos por stop/take/trailling + LOCK PROFIT)
+        # Gerenciar posições: trailing stops, break-even, partial TPs, execução de steps
         for sym in list(self.carteira.posicoes.keys()):
             try:
                 tk = self.safe_ticker(sym)
@@ -1012,67 +1044,99 @@ class RoboTrader:
                 self.market_prices[sym] = price
                 pos = self.carteira.posicoes[sym]
 
-                # Trailing Stop (conservador: usa ATR)
-                if pos.get('atr'):
-                    new_trail = price - pos['atr']
-                    if pos.get('trail_stop') is None or new_trail > pos['trail_stop']:
+                atr = pos.get('atr') or 0.0
+                # Trailing stop inteligente (baseado em ATR)
+                trailing_mult = CONFIG.get('trailing_atr_multiplier', 1.0)
+                if atr and atr > 0:
+                    new_trail = price - (atr * trailing_mult)
+                    if pos.get('trail_stop') is None or new_trail > pos.get('trail_stop'):
                         pos['trail_stop'] = new_trail
 
-                # --- NOVA LÓGICA: LOCK PROFIT ---
-                # Calcula lucro não realizado
+                # Break-even automático
+                be_atr = CONFIG.get('break_even_profit_atr', 1.0)
+                if atr and atr > 0:
+                    be_trigger_price = pos.get('entry_price') + (be_atr * atr)
+                    # adiciona tiny buffer para fees
+                    tiny_buf = 0.0005 * pos.get('entry_price', 0.0)
+                    if price >= be_trigger_price:
+                        # move stop para entry + tiny_buf se stop inferior
+                        new_stop = max(pos.get('stop_price') or 0.0, pos.get('entry_price') + tiny_buf)
+                        if pos.get('stop_price') is None or new_stop > pos.get('stop_price'):
+                            pos['stop_price'] = new_stop
+
+                # Saída parcial: verifica tiers e executa redução quando atingido
+                # usar take_profit_tiers do CONFIG ou take_price simples
+                tiers = CONFIG.get('take_profit_tiers', [])
+                # também suporta pos['take_price'] como fallback single TP
+                for i, tier in enumerate(tiers):
+                    tier_marker = f"tier_{i}"
+                    if tier_marker in pos.get('tp_executed', []):
+                        continue
+                    # calcula target price absoluto: porcentagem relativa ao entry
+                    tp_price = pos.get('entry_price') * (1.0 + tier.get('pct', 0.0))
+                    if price >= tp_price:
+                        # vende portion * current quantity
+                        portion = tier.get('portion', 0.0)
+                        qty_to_sell = pos.get('quantity', 0.0) * portion
+                        if qty_to_sell > 0:
+                            rec = self.carteira.reduzir_posicao(sym, qty_to_sell, price, reason=f"TP_tier_{i}")
+                            if rec:
+                                metrics.record_trade(rec['pnl'])
+                                # marca tier como executada
+                                pos = self.carteira.posicoes.get(sym, {})
+                                # se posição foi completamente fechada, break
+                                if sym not in self.carteira.posicoes:
+                                    break
+                                pos.setdefault('tp_executed', []).append(tier_marker)
+
+                # LOCK PROFIT e stops finais
                 entry_price = pos.get('entry_price', 0.0)
                 quantity = pos.get('quantity', 0.0)
                 invested = pos.get('invested', entry_price * quantity)
                 unreal_pnl = (price - entry_price) * quantity
                 unreal_pct = (unreal_pnl / invested) if invested and invested > 0 else 0.0
 
-                # thresholds do CONFIG
                 min_profit_usd = CONFIG.get('min_profit_usd', 0.10)
                 min_profit_pct = CONFIG.get('min_profit_pct', 0.005)
 
                 reason = None
-                # Prioriza LOCK PROFIT: fecha se atingiu lucro mínimo (conservador)
                 if unreal_pnl >= min_profit_usd or unreal_pct >= min_profit_pct:
                     reason = "LOCK PROFIT"
 
-                # Mantém stops/takes/trailing originais como fallback
+                # fallback stops
                 if reason is None:
                     if pos.get('stop_price') and price <= pos['stop_price']:
                         reason = "STOP LOSS"
-                    elif pos.get('take_price') and price >= pos['take_price']:
-                        reason = "TAKE PROFIT"
                     elif pos.get('trail_stop') and price <= pos['trail_stop']:
                         reason = "TRAILING STOP"
 
                 if reason:
-                    # chama fechar_posicao — a função tratará dust/min_amount e parcial/total
-                    rec = self.carteira.fechar_posicao(sym, price, reason=reason)
+                    rec = self.carteira.reduzir_posicao(sym, pos.get('quantity', 0.0), price, reason=reason)
                     if rec:
                         metrics.record_trade(rec['pnl'])
             except Exception:
-                # Não polui logs com cada exceção pequena aqui
+                # não poluir logs
                 pass
 
-        # 3. Novas Entradas
+        # Novas Entradas
         self.carteira._check_daily_reset()
         if self.carteira.daily_trades >= CONFIG['max_daily_trades']:
             logger.info("Limite diário de trades atingido", daily_trades=self.carteira.daily_trades)
             return
 
         if not allow_entries:
-            # drawdown crítico: não abrir novas posições
             return
 
         slots = max(0, CONFIG['max_positions'] - len(self.carteira.posicoes))
         if slots <= 0:
-            # já no máximo de posições
             return
 
-        # Recolhe candidatos (scores)
+        # Roda análise e pontuação
         all_candidates: List[Dict[str, Any]] = []
         for sym in CONFIG['symbols']:
             try:
                 if sym in self.carteira.posicoes:
+                    # se existe posição com entry_plan pendente, entregamos execução mais acima
                     continue
                 if self.cooldowns.get(sym) and datetime.datetime.now() < self.cooldowns[sym]:
                     continue
@@ -1084,10 +1148,9 @@ class RoboTrader:
                 price = float(row.get('c') or 0.0)
                 atr = float(row.get('atr') or 0.0)
                 if atr <= 0:
-                    # fallback prático: 0.5% do preço (evita stop_dist==0)
                     atr = max(price * 0.005, 1e-8)
 
-                # --- LÓGICA DE PONTUAÇÃO (PRIORIZA IA) ---
+                # IA / model scoring
                 score = 0.0
                 used_model = 'NONE'
                 p_win = 0.5
@@ -1096,8 +1159,6 @@ class RoboTrader:
                         model_data = self.models[sym]
                         features = model_data.get('features', [])
                         x = pd.DataFrame([{k: row.get(k, 0) for k in features}])
-                        # predict_proba pode falhar se o modelo não suportar; try/except
-                        # Se for scikit models, predict_proba existe; se não, fallback
                         model = model_data['model']
                         if hasattr(model, 'predict_proba'):
                             p_win = float(model.predict_proba(x)[0][1])
@@ -1110,34 +1171,31 @@ class RoboTrader:
                             score = 0.5
                         used_model = 'USADO'
                     except Exception as e:
-                        # fallback conservador
                         p_win = 0.5
                         score = 0.5
                         used_model = 'FALLBACK'
                         if CONFIG['verbose_logs']:
                             logger.error("Falha na previsão da IA. Usando fallback.", symbol=sym, error=str(e))
                 else:
-                    # Fallback simples (mantive sua lógica)
                     score = 0.5
                     p_win = 0.5
                     if row.get('rsi', 50.0) < 35:
-                        score += 0.2
-                        p_win += 0.1
+                        score += 0.15
+                        p_win += 0.08
                     if row.get('ema50') and row['c'] > row['ema50']:
-                        score += 0.1
-                        p_win += 0.05
+                        score += 0.08
+                        p_win += 0.03
+                    # filtro adicional: preço acima KAMA preferível
+                    if 'kama' in row and row['c'] > row['kama']:
+                        score += 0.05
+                        p_win += 0.02
                     used_model = 'FALLBACK'
 
-                # Computa EV por unidade (USD por 1 unidade do ativo)
                 ev_per_unit, win_amount, loss_amount = self._expected_value_per_unit(p_win, atr)
-
-                # Normaliza EV para proporção relativa ao preço (ev per USD invested)
                 ev_per_usd = ev_per_unit / max(price, 1e-8)
 
-                # Logs
                 if CONFIG['verbose_logs']:
-                    logger.info("Score IA", symbol=sym, score=f"{score:.4f}", model=used_model, p_win=round(p_win,4),
-                                ev_per_unit=round(ev_per_unit,6), ev_per_usd=round(ev_per_usd,6))
+                    logger.info("Score IA", symbol=sym, score=f"{score:.4f}", model=used_model, p_win=round(p_win,4), ev_per_unit=round(ev_per_unit,6))
 
                 all_candidates.append({
                     'symbol': sym,
@@ -1150,7 +1208,6 @@ class RoboTrader:
                     'row': row
                 })
             except Exception:
-                # não poluir logs com cada falha pequena de símbolo
                 continue
 
         if not all_candidates:
@@ -1158,10 +1215,8 @@ class RoboTrader:
                 logger.info("Nenhum candidato analisado neste ciclo.")
             return
 
-        # Ordena por score decrescente
         all_candidates.sort(key=lambda x: x['score'], reverse=True)
 
-        # Thresholds adaptativos: tenta encontrar candidatos com limiares menores se necessário
         thresholds = [CONFIG.get('min_confidence', 0.55), 0.50, 0.45, 0.40]
         selected_candidates: List[Dict[str, Any]] = []
         used_threshold = None
@@ -1172,7 +1227,6 @@ class RoboTrader:
                 logger.info("Candidatos encontrados (com EV positivo)", threshold=thr, found=len(selected_candidates))
                 break
 
-        # Se ainda vazio, permite forçar o melhor candidato Razoável (>=0.40) *apenas se EV positivo*
         if not selected_candidates:
             top = all_candidates[0]
             if top['score'] >= 0.40 and top['ev_per_usd'] >= CONFIG.get('min_expected_ev', 0.0):
@@ -1180,17 +1234,13 @@ class RoboTrader:
                 used_threshold = 'forced_top_>=0.40_with_EV_check'
                 logger.warning("Forçando melhor candidato (>=0.40) com EV positivo", symbol=top['symbol'], score=top['score'], ev_per_usd=top['ev_per_usd'])
             else:
-                # Nenhum candidato qualificado
                 logger.info("Nenhum candidato qualificado encontrado neste ciclo", best_score=all_candidates[0]['score'], best_ev=all_candidates[0]['ev_per_usd'])
                 return
 
-        # Reduz à quantidade de slots disponíveis
         selected_candidates = selected_candidates[:slots]
 
-        # --- DIVERSIFICAÇÃO / ALOCAÇÃO ---
-        # Calcula cash disponível para novas ordens (respeita buffer)
+        # ALOCAÇÃO (mantém buffer e respeita exposição máxima)
         available_cash = max(0.0, self.carteira.cash * (1.0 - CONFIG['allocation_buffer_pct']))
-        # também respeita exposição máxima
         current_exposure = sum([p['invested'] for p in self.carteira.posicoes.values()]) if self.carteira.posicoes else 0.0
         max_allowed_exposure = total_equity * CONFIG['max_exposure_pct']
         remaining_exposure_capacity = max_allowed_exposure - current_exposure
@@ -1198,72 +1248,58 @@ class RoboTrader:
             logger.warning("Capacidade de exposição esgotada", current_exposure=current_exposure, max_allowed=max_allowed_exposure)
             return
 
-        # limit available cash by remaining exposure capacity (em USD)
         available_cash = min(available_cash, remaining_exposure_capacity, self.carteira.cash)
 
         if available_cash < CONFIG['min_trade_usd']:
             logger.info("Cash insuficiente para novas alocações", available_cash=round(available_cash, 4))
             return
 
-        # Determina alocações por slot (baseadas em EV-weighted proportional)
         total_score = sum(max(0.0, c['ev_per_usd']) for c in selected_candidates) or sum(c['score'] for c in selected_candidates) or 1.0
         allocations = []
         for c in selected_candidates:
             if CONFIG['allocation_mode'] == 'equal':
                 alloc = available_cash / len(selected_candidates)
-            else:  # proportional por EV preferencialmente
+            else:
                 weight = max(0.0, c['ev_per_usd'])
                 if weight == 0:
                     weight = c['score']
                 alloc = (weight / total_score) * available_cash
-            # garante mínimo por slot
             if alloc < CONFIG['min_allocation_per_slot']:
                 alloc = CONFIG['min_allocation_per_slot']
             allocations.append(max(0.0, alloc))
 
-        # Ajusta alocações se excederem o available_cash (normaliza)
         total_alloc = sum(allocations)
         if total_alloc > available_cash:
             factor = available_cash / total_alloc
             allocations = [a * factor for a in allocations]
             total_alloc = sum(allocations)
 
-        # Associa alocações aos candidatos (mantendo ordem)
         for idx, cand in enumerate(selected_candidates):
             cand['allocation'] = allocations[idx] if idx < len(allocations) else allocations[-1]
 
-        # Finalmente, tenta abrir posições com base em alocação + risco + EV sizing
+        # Tentar abrir posições com entry ladder
         for cand in selected_candidates:
             if slots <= 0:
                 break
-
             sym = cand['symbol']
             price = cand['price']
             atr = cand['atr']
-            score = cand['score']
-            p_win = cand['p_win']
-            ev_per_unit = cand['ev_per_unit']
-            ev_per_usd = cand['ev_per_usd']
             allocation = float(cand.get('allocation', CONFIG['min_allocation_per_slot']))
+            p_win = cand['p_win']
 
-            # calcula qty pelo método de risco e também pelo allocation; toma o menor para não sobreinvestir
-            # risk_amt baseado em total_equity (consistente com gestão de risco)
+            # EV-based risk sizing
             base_risk_amt = total_equity * CONFIG['risk_per_trade']
-
-            # Risco adaptativo: multiplicador baseado no EV por USD (mais EV -> maior multiplicador), limitado
             risk_modifier = 1.0
             try:
+                ev_per_usd = cand.get('ev_per_usd', 0.0)
                 if ev_per_usd > 0:
                     risk_modifier = 1.0 + min(2.0, ev_per_usd / 0.01)
                 else:
                     risk_modifier = max(0.1, 1.0 + ev_per_usd / 0.01)
             except Exception:
                 risk_modifier = 1.0
-
-            # Se modo conservador, reduz risco_modifier para evitar multiplicadores agressivos
             if CONFIG.get('conservative_mode', True):
-                risk_modifier = min(risk_modifier, 1.15)  # máximo 15% de aumento no conservador
-
+                risk_modifier = min(risk_modifier, 1.15)
             risk_amt = base_risk_amt * risk_modifier
 
             stop_dist = atr * CONFIG['stop_loss_mult']
@@ -1273,16 +1309,10 @@ class RoboTrader:
 
             qty_by_risk = risk_amt / stop_dist
             cost_by_risk = qty_by_risk * price
-
-            # qty baseado na alocação
             qty_by_alloc = allocation / price if price > 0 else 0.0
-            cost_by_alloc = qty_by_alloc * price
-
-            # decide qty final: não exceder allocation nem risco, usa o menor qty
             qty = min(qty_by_risk, qty_by_alloc)
             cost = qty * price
 
-            # Ajuste de precision: tenta usar amount_to_precision se disponível
             try:
                 if qty > 0 and hasattr(self.carteira.exchange, 'amount_to_precision'):
                     qty = float(self.carteira.exchange.amount_to_precision(sym, qty))
@@ -1290,9 +1320,7 @@ class RoboTrader:
             except Exception:
                 pass
 
-            # se qty muito pequeno (ordem pode falhar por limites mínimos), força min allocation/qty
             if cost < CONFIG['min_trade_usd']:
-                # tenta forçar mínimo (se houver cash)
                 if self.carteira.cash >= CONFIG['min_trade_usd'] and (current_exposure + CONFIG['min_trade_usd']) <= max_allowed_exposure:
                     cost = CONFIG['min_trade_usd']
                     qty = cost / price if price > 0 else 0.0
@@ -1301,10 +1329,8 @@ class RoboTrader:
                     logger.info("Pular: custo calculado abaixo do mínimo e não há margem para forçar", symbol=sym, calc_cost=round(cost, 4))
                     continue
 
-            # válidação exposição e saldo
             current_exposure = sum([p['invested'] for p in self.carteira.posicoes.values()]) if self.carteira.posicoes else 0.0
             max_allowed_exposure = total_equity * CONFIG['max_exposure_pct']
-
             if (current_exposure + cost) > max_allowed_exposure:
                 logger.warning("Pular: Exposição total excedida ao abrir", symbol=sym, would_exposure=round(current_exposure + cost, 4), max_allowed=round(max_allowed_exposure, 4))
                 continue
@@ -1313,29 +1339,30 @@ class RoboTrader:
                 logger.warning("Pular: Saldo livre insuficiente", symbol=sym, cost=round(cost, 4), cash=round(self.carteira.cash, 4))
                 continue
 
-            # final: abrir posição (stop e take calculados com base em atr)
-            stop_price = max(0.0, price - stop_dist)
-            take_price = price + (atr * CONFIG['take_profit_mult'])
-            ok = self.carteira.abrir_posicao(
-                sym, price, qty, atr,
-                stop_price=stop_price,
-                take_price=take_price
-            )
+            # Prepara plano de entrada escalonada e abre primeiro step (se houver)
+            entry_plan = self._plan_entry_ladder(price, atr, allocation)
+            first_step = None
+            for step in entry_plan:
+                if not step['done']:
+                    first_step = step
+                    break
+            if not first_step:
+                logger.warning("Sem steps válidos no plano", symbol=sym)
+                continue
 
+            step_qty = first_step['qty']
+            step_price = first_step['price_level']
+            # calcula stop e take com base no price (usando stop_dist)
+            stop_price = max(0.0, step_price - stop_dist)
+            take_price = step_price + (atr * CONFIG['take_profit_mult'])
+
+            ok = self.carteira.abrir_posicao(sym, step_price, step_qty, atr, stop_price=stop_price, take_price=take_price, entry_plan=entry_plan)
             if ok:
                 slots -= 1
-                # adiciona cooldown por grupo para evitar concentrar entradas no mesmo grupo nas próximas horas
                 grp = SYMBOL_TO_GROUP.get(sym, 'ungrouped')
-                # aplica cooldown para todos símbolos do grupo
                 for s in CONFIG['groups'].get(grp, [sym]):
                     self.cooldowns[s] = datetime.datetime.now() + datetime.timedelta(seconds=CONFIG['group_cooldown_seconds'])
-                logger.info("Ordem aberta e cooldown aplicado ao grupo",
-                            symbol=sym,
-                            group=grp,
-                            allocated=round(cost, 4),
-                            p_win=round(p_win, 4),
-                            ev_per_usd=round(ev_per_usd, 6),
-                            risk_modifier=round(risk_modifier, 3))
+                logger.info("Ordem aberta (step 1) e cooldown aplicado ao grupo", symbol=sym, group=grp, allocated=round(cost, 4), p_win=round(p_win, 4))
 
     def loop(self):
         self.running = True
@@ -1381,8 +1408,24 @@ def api_stop():
 
 @app.route('/api/logs', methods=['GET'])
 def api_logs():
-    # Retorna logs mais relevantes (já bufferizados pelo StructuredLogger)
     return jsonify(list(reversed(logger.buffer)))
+
+
+# --- NEW: endpoint para retornar histórico completo (corrige 'sumiu') ---
+@app.route('/api/history', methods=['GET'])
+def api_history():
+    try:
+        hist = bot.carteira.historico
+        # fallback: tenta ler history file se in-memory vazio
+        if (not hist or len(hist) == 0) and os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, 'r') as f:
+                    hist = json.load(f) or hist
+            except Exception:
+                pass
+        return jsonify(hist)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/status', methods=['GET'])
@@ -1413,5 +1456,5 @@ def api_status():
 
 
 if __name__ == '__main__':
-    print("\033[92m=== TRADING REAL (R$ 100/17 USDT) - VERSÃO AJUSTADA + LOCK-PROFIT ===\033[0m")
+    print("\033[92m=== TRADING REAL (R$ 100/17 USDT) - VERSÃO OPÇÃO C (UPGRADE) ===\033[0m")
     app.run(host='0.0.0.0', port=5000)
