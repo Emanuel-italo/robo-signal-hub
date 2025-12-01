@@ -3,13 +3,12 @@
 VERSÃO DE PRODUÇÃO (LIVE TRADING)
 Ajustada para banca pequena (~17 USDT / R$ 100).
 INTEGRAÇÃO TOTAL COM MODELOS DE IA TREINADOS e ajuste de dimensionamento.
-Corrigido e melhorado:
- - detecção/limpeza de dust (quantias menores que min_amount)
- - Expected Value (EV) para decisões (probabilidade * ganho - (1-prob)*perda)
- - position sizing dinâmico (risk_per_trade combinado com EV)
- - drawdown protection
- - registro de samples e tentativa de partial_fit quando possível
- - mantém lógica original de sinais/IA e comportamentos conservadores
+Inclui:
+ - EV & risk-sizing
+ - limpeza de dust (min_amount)
+ - registro de samples
+ - proteção por drawdown
+ - venda automática ao atingir lucro (LOCK PROFIT)
 """
 from __future__ import annotations
 
@@ -142,6 +141,12 @@ CONFIG = {
     'min_expected_ev': 0.0005,         # min EV por USD de posição para considerar (ex.: 0.0005 USD por 1 USD investido)
     'conservative_mode': True,         # se True, enrijece stops/taking e reduz risco
     'max_drawdown_pct': 0.20,          # se drawdown > 20% pausa entradas
+
+    # VENDA AO ALCANÇAR LUCRO (LOCK PROFIT)
+    # Se o lucro não realizado (em USD) >= min_profit_usd OU lucro percentual >= min_profit_pct,
+    # o robô fechará a posição para "garantir ganho".
+    'min_profit_usd': 0.10,   # padrão conservador (ajuste conforme sua preferência)
+    'min_profit_pct': 0.005,  # 0.5% do capital investido na posição
 
     # Logging
     'verbose_logs': False,  # se True mostra muitos logs; se False, apenas logs relevantes
@@ -960,7 +965,7 @@ class RoboTrader:
         """
         Calcula EV (em USD por unidade) usando ATR-based stop/take.
         EV = p*win_amount - (1-p)*loss_amount
-        Onde win_amount = take_profit_mult * atr (USD per unit), loss_amount = stop_loss_mult * atr.
+        Onde win_amount = take_profit_mult * atr (USD por unit), loss_amount = stop_loss_mult * atr.
         """
         win_amount = CONFIG['take_profit_mult'] * atr
         loss_amount = CONFIG['stop_loss_mult'] * atr
@@ -997,7 +1002,7 @@ class RoboTrader:
         else:
             allow_entries = True
 
-        # 2. Gerenciar Posições (fechamentos por stop/take/trailling)
+        # 2. Gerenciar Posições (fechamentos por stop/take/trailling + LOCK PROFIT)
         for sym in list(self.carteira.posicoes.keys()):
             try:
                 tk = self.safe_ticker(sym)
@@ -1013,15 +1018,34 @@ class RoboTrader:
                     if pos.get('trail_stop') is None or new_trail > pos['trail_stop']:
                         pos['trail_stop'] = new_trail
 
+                # --- NOVA LÓGICA: LOCK PROFIT ---
+                # Calcula lucro não realizado
+                entry_price = pos.get('entry_price', 0.0)
+                quantity = pos.get('quantity', 0.0)
+                invested = pos.get('invested', entry_price * quantity)
+                unreal_pnl = (price - entry_price) * quantity
+                unreal_pct = (unreal_pnl / invested) if invested and invested > 0 else 0.0
+
+                # thresholds do CONFIG
+                min_profit_usd = CONFIG.get('min_profit_usd', 0.10)
+                min_profit_pct = CONFIG.get('min_profit_pct', 0.005)
+
                 reason = None
-                if pos.get('stop_price') and price <= pos['stop_price']:
-                    reason = "STOP LOSS"
-                elif pos.get('take_price') and price >= pos['take_price']:
-                    reason = "TAKE PROFIT"
-                elif pos.get('trail_stop') and price <= pos['trail_stop']:
-                    reason = "TRAILING STOP"
+                # Prioriza LOCK PROFIT: fecha se atingiu lucro mínimo (conservador)
+                if unreal_pnl >= min_profit_usd or unreal_pct >= min_profit_pct:
+                    reason = "LOCK PROFIT"
+
+                # Mantém stops/takes/trailing originais como fallback
+                if reason is None:
+                    if pos.get('stop_price') and price <= pos['stop_price']:
+                        reason = "STOP LOSS"
+                    elif pos.get('take_price') and price >= pos['take_price']:
+                        reason = "TAKE PROFIT"
+                    elif pos.get('trail_stop') and price <= pos['trail_stop']:
+                        reason = "TRAILING STOP"
 
                 if reason:
+                    # chama fechar_posicao — a função tratará dust/min_amount e parcial/total
                     rec = self.carteira.fechar_posicao(sym, price, reason=reason)
                     if rec:
                         metrics.record_trade(rec['pnl'])
@@ -1227,15 +1251,11 @@ class RoboTrader:
             base_risk_amt = total_equity * CONFIG['risk_per_trade']
 
             # Risco adaptativo: multiplicador baseado no EV por USD (mais EV -> maior multiplicador), limitado
-            # formula simples e conservadora:
-            # risk_modifier = 1 + clamp(ev_per_usd / 0.01, -0.8, 2.0)
-            # Isso significa: se EV por USD = 0.01 (1%), risk_modifier += 1 -> dobraria o risco (limitado abaixo)
             risk_modifier = 1.0
             try:
                 if ev_per_usd > 0:
                     risk_modifier = 1.0 + min(2.0, ev_per_usd / 0.01)
                 else:
-                    # penaliza eventos com baixo/negativo EV
                     risk_modifier = max(0.1, 1.0 + ev_per_usd / 0.01)
             except Exception:
                 risk_modifier = 1.0
@@ -1393,5 +1413,5 @@ def api_status():
 
 
 if __name__ == '__main__':
-    print("\033[92m=== TRADING REAL (R$ 100/17 USDT) - VERSÃO AJUSTADA + EV & RISK-SIZING ===\033[0m")
+    print("\033[92m=== TRADING REAL (R$ 100/17 USDT) - VERSÃO AJUSTADA + LOCK-PROFIT ===\033[0m")
     app.run(host='0.0.0.0', port=5000)
