@@ -1,14 +1,16 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
-import { Wallet, DollarSign, Activity, Power, TrendingUp, Target, BrainCircuit, ShieldCheck, Filter, ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { 
+  Wallet, DollarSign, Activity, Power, TrendingUp, Target, BrainCircuit, 
+  ShieldCheck, Filter, ArrowUpRight, ArrowDownRight, Zap, Volume2, VolumeX 
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line
 } from "recharts";
-// CORREÇÃO: Agora importamos BotStatus da api, pois o arquivo api.ts exporta ele.
 import { api, BotStatus } from "@/services/api"; 
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
@@ -20,10 +22,10 @@ interface ChartData {
   value: number;
 }
 
-const COLORS = ['#ef4444', '#fca5a5'];
+const COLORS = ['#10b981', '#ef4444']; // Emerald (Win) vs Red (Loss)
 
 const Dashboard = () => {
-  // Busca status com tipagem automática ou inferida
+  // --- ESTADOS E DADOS ---
   const { data: rawStatus, refetch: refetchStatus } = useQuery({
     queryKey: ["botStatus"],
     queryFn: api.getStatus,
@@ -36,27 +38,44 @@ const Dashboard = () => {
     refetchInterval: 5000,
   });
 
-  // Cast simples e seguro
   const status = rawStatus as BotStatus | undefined;
   
   const { requestLock, releaseLock } = useWakeLock();
   
   const [equityData, setEquityData] = useState<ChartData[]>([]);
   const [winRateData, setWinRateData] = useState<{name: string, value: number}[]>([]);
-  const [trend, setTrend] = useState<'up' | 'down' | 'neutral'>('neutral');
   const [selectedAsset, setSelectedAsset] = useState<string>("GLOBAL");
+  
+  // Controle de Som
+  const [soundEnabled, setSoundEnabled] = useState(true);
 
-  // Notificações
+  // --- ÁUDIO SYSTEM ---
+  const playSound = (type: 'buy' | 'win' | 'loss') => {
+    if (!soundEnabled) return;
+    try {
+        const audio = new Audio(`/sounds/${type}.mp3`);
+        audio.volume = 0.5;
+        audio.play().catch(e => console.log("Erro ao reproduzir som (verifique se os arquivos existem em public/sounds/):", e));
+    } catch (error) {
+        console.error("Audio error", error);
+    }
+  };
+
+  // --- EFEITOS (NOTIFICAÇÕES E SOM) ---
   useEffect(() => {
     if (status?.lastEvent) {
       const evt = status.lastEvent;
+      
+      // Lógica de Som e Toast
       if (evt.type === 'BUY') {
+        playSound('buy');
         toast.success(`COMPRA EXECUTADA: ${evt.symbol}`, {
           description: `Entrada em $${evt.price?.toFixed(2)}`,
           className: "bg-black border-2 border-red-500/50 text-white font-bold"
         });
       } else if (evt.type === 'SELL') {
         const isWin = (evt.pnl || 0) > 0;
+        playSound(isWin ? 'win' : 'loss');
         toast(isWin ? "LUCRO REALIZADO!" : "STOP LOSS", {
           description: `${evt.symbol} PnL: $${evt.pnl?.toFixed(2)}`,
           className: isWin ? "bg-emerald-950 border-emerald-500 text-emerald-400" : "bg-red-950 border-red-500 text-red-400"
@@ -71,22 +90,18 @@ const Dashboard = () => {
     else releaseLock();
   }, [status?.isRunning, requestLock, releaseLock]);
 
-  // Atualiza Gráfico
+  // Atualiza Gráfico de Patrimônio
   useEffect(() => {
     if (status?.equity) {
       const now = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       setEquityData(prev => {
         const newData = [...prev, { time: now, value: status.equity }];
-        if (prev.length > 0) {
-          const last = prev[prev.length - 1].value;
-          setTrend(status.equity > last ? 'up' : status.equity < last ? 'down' : 'neutral');
-        }
         return newData.slice(-40); 
       });
     }
   }, [status]);
 
-  // Win Rate
+  // Atualiza Dados de Win Rate
   useEffect(() => {
     if (history && Array.isArray(history)) {
       const wins = history.filter((t: any) => t.pnl > 0).length;
@@ -109,6 +124,8 @@ const Dashboard = () => {
         await api.stopBot();
       } else {
         await api.startBot();
+        // Toca um som de "start" (pode usar o buy ou win como feedback)
+        playSound('buy');
       }
       setTimeout(() => refetchStatus(), 500);
     } catch (error) {
@@ -117,17 +134,19 @@ const Dashboard = () => {
     }
   };
 
-  // Métricas
+  // --- CÁLCULOS FINANCEIROS DETALHADOS ---
   const metrics = useMemo(() => {
     if (!status) return null;
 
     const positions = status.openPositions || [];
+    let baseMetrics;
 
+    // Métricas Básicas (Topo)
     if (selectedAsset === "GLOBAL") {
         const totalInvested = positions.reduce((acc, pos) => acc + pos.invested, 0);
         const totalPnL = positions.reduce((acc, pos) => acc + pos.pnl, 0);
         
-        return {
+        baseMetrics = {
             title: "PATRIMÔNIO LÍQUIDO",
             value: status.equity,
             subValue: status.balance,
@@ -138,9 +157,9 @@ const Dashboard = () => {
         };
     } else {
         const pos = positions.find(p => p.symbol === selectedAsset);
-        if (!pos) return null;
+        if (!pos) return null; // Retorna null se o ativo não existir
 
-        return {
+        baseMetrics = {
             title: `POSIÇÃO: ${pos.symbol}`,
             value: pos.invested + pos.pnl,
             subValue: pos.invested,
@@ -150,7 +169,35 @@ const Dashboard = () => {
             isGlobal: false
         };
     }
-  }, [status, selectedAsset]);
+
+    // Métricas Detalhadas de Histórico (Ganhos vs Perdas Totais)
+    let grossProfit = 0;
+    let grossLoss = 0;
+
+    if (history && Array.isArray(history)) {
+        const filteredHistory = selectedAsset === "GLOBAL" 
+            ? history 
+            : history.filter((t: any) => t.symbol === selectedAsset);
+
+        grossProfit = filteredHistory
+            .filter((t: any) => t.pnl > 0)
+            .reduce((acc: number, t: any) => acc + t.pnl, 0);
+
+        grossLoss = filteredHistory
+            .filter((t: any) => t.pnl < 0)
+            .reduce((acc: number, t: any) => acc + t.pnl, 0);
+    }
+
+    return { ...baseMetrics, grossProfit, grossLoss };
+  }, [status, selectedAsset, history]);
+
+  // Cálculo da Taxa de Acerto para exibição central
+  const winRatePercent = useMemo(() => {
+    if (winRateData.length === 0) return 0;
+    const wins = winRateData.find(d => d.name === 'Wins')?.value || 0;
+    const total = winRateData.reduce((acc, curr) => acc + curr.value, 0);
+    return total > 0 ? (wins / total) * 100 : 0;
+  }, [winRateData]);
 
   // Reset do filtro se o ativo sumir
   useEffect(() => {
@@ -160,69 +207,90 @@ const Dashboard = () => {
       }
   }, [status, selectedAsset]);
 
-  return (
-    <div className="space-y-8 animate-in fade-in zoom-in-95 duration-700">
+  if (!metrics) return <div className="p-10 text-center text-white animate-pulse">Carregando dados do sistema...</div>;
 
-      {/* Ticker - Agora tipado corretamente */}
+  return (
+    <div className="space-y-6 animate-in fade-in zoom-in-95 duration-700 pb-10">
+
+      {/* --- TICKER --- */}
       {status && status.marketPrices && (
-        <div className="rounded-xl border border-red-900/30 overflow-hidden shadow-lg bg-black/40 backdrop-blur-sm">
+        <div className="rounded-xl border-y border-red-900/30 overflow-hidden shadow-lg bg-black/60 backdrop-blur-md">
            <MarketTicker prices={status.marketPrices} />
         </div>
       )}
       
-      {/* Banner */}
-      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-red-600 to-red-500 p-8 text-white shadow-2xl shadow-red-500/30">
-        <div className="absolute top-0 right-0 -mt-10 -mr-10 w-64 h-64 bg-white/10 rounded-full blur-3xl"></div>
-        <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
-          <div className="flex items-center gap-4">
-            <div className="p-3 bg-white/20 backdrop-blur-md rounded-2xl">
-              <BrainCircuit className="w-8 h-8 text-white" />
+      {/* --- HERO BANNER --- */}
+      <div className="relative overflow-hidden rounded-3xl p-1">
+        <div className="absolute inset-0 bg-gradient-to-r from-red-600 via-red-900 to-black opacity-50 blur-sm"></div>
+        
+        <div className="relative bg-black/80 backdrop-blur-xl rounded-[22px] p-6 md:p-8 flex flex-col md:flex-row justify-between items-center gap-6 overflow-hidden">
+            <div className="absolute top-0 right-0 -mt-20 -mr-20 w-96 h-96 bg-red-600/10 rounded-full blur-[100px]"></div>
+            
+            <div className="flex items-center gap-5 z-10">
+                <div className="relative">
+                    <div className={`absolute inset-0 bg-red-500 blur-xl opacity-20 ${status?.isRunning ? 'animate-pulse' : ''}`}></div>
+                    <div className="p-4 bg-gradient-to-br from-red-950 to-black border border-red-800/50 rounded-2xl shadow-inner relative">
+                        <BrainCircuit className={`w-10 h-10 ${status?.isRunning ? 'text-red-400' : 'text-gray-500'}`} />
+                    </div>
+                </div>
+                <div>
+                    <h2 className="text-3xl md:text-4xl font-black tracking-tighter text-white italic">
+                        PAINEL <span className="text-red-500">COMANDO</span>
+                    </h2>
+                    <div className="flex items-center gap-3 mt-1">
+                        <div className={`h-2 w-2 rounded-full ${status?.isRunning ? 'bg-emerald-500 animate-pulse shadow-[0_0_10px_#10b981]' : 'bg-red-500'}`}></div>
+                        <p className="text-gray-400 font-mono text-sm uppercase tracking-widest">
+                            {status?.isRunning ? "Sistema Online" : "Sistema Parado"}
+                        </p>
+                    </div>
+                </div>
             </div>
-            <div>
-              <h2 className="text-3xl font-black tracking-tight">PAINEL DE COMANDO</h2>
-              <div className="flex items-center gap-2">
-                <p className="text-red-100 font-medium opacity-90">Inteligência Artificial Operacional</p>
-                {status?.isRunning && (
-                    <Badge className="bg-white/20 text-white border-none animate-pulse">
-                        <ShieldCheck className="w-3 h-3 mr-1" /> PROTEÇÃO ATIVA
-                    </Badge>
-                )}
-              </div>
+            
+            <div className="flex gap-3">
+                 <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => setSoundEnabled(!soundEnabled)}
+                    className="h-14 w-14 rounded-xl border-white/10 bg-black/40 text-white hover:bg-white/10 hover:text-red-400 transition-colors"
+                 >
+                    {soundEnabled ? <Volume2 className="w-6 h-6" /> : <VolumeX className="w-6 h-6 text-gray-500" />}
+                 </Button>
+
+                <Button 
+                    size="lg"
+                    onClick={handleToggleBot}
+                    className={`
+                        relative h-14 px-10 text-lg font-bold tracking-widest uppercase transition-all duration-500
+                        overflow-hidden group border
+                        ${status?.isRunning 
+                            ? "bg-red-500/10 text-red-500 border-red-500/50 hover:bg-red-500 hover:text-white hover:border-red-500" 
+                            : "bg-emerald-500/10 text-emerald-500 border-emerald-500/50 hover:bg-emerald-500 hover:text-white hover:border-emerald-500"
+                        }
+                    `}
+                >
+                    <Power className={`w-5 h-5 mr-3 transition-transform group-hover:scale-125 ${status?.isRunning ? "animate-pulse" : ""}`} />
+                    {status?.isRunning ? "Desativar" : "Iniciar"}
+                </Button>
             </div>
-          </div>
-          
-          <Button 
-            size="lg"
-            onClick={handleToggleBot}
-            className={`h-14 px-8 text-lg font-bold tracking-wider transition-all duration-300 transform hover:scale-105 shadow-xl border-2
-              ${status?.isRunning 
-                ? "bg-white text-red-600 hover:bg-red-50 border-transparent" 
-                : "bg-transparent text-white border-white hover:bg-white/10"
-              }`}
-          >
-            <Power className={`w-5 h-5 mr-3 ${status?.isRunning ? "animate-pulse" : ""}`} />
-            {status?.isRunning ? "DESATIVAR SISTEMA" : "ATIVAR SISTEMA"}
-          </Button>
         </div>
       </div>
 
-      {/* Filtros */}
-      <div className="flex flex-col md:flex-row gap-4 items-stretch md:items-center justify-between bg-black/40 p-4 rounded-xl border border-white/5 backdrop-blur-md">
-        
-        <div className="flex items-center gap-4 flex-1">
-            <div className="p-2 bg-red-500/10 rounded-lg border border-red-500/20">
-                <Filter className="w-5 h-5 text-primary" />
+      {/* --- CONTROL BAR --- */}
+      <div className="glass-panel p-4 rounded-xl flex flex-col md:flex-row gap-4 items-center justify-between border-l-4 border-l-red-600">
+        <div className="flex items-center gap-3 w-full md:w-auto">
+            <div className="p-2 bg-white/5 rounded-lg">
+                <Filter className="w-5 h-5 text-red-400" />
             </div>
-            <div className="flex-1">
-                <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Visualização do Painel</p>
+            <div className="flex-1 md:flex-none">
+                <span className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Filtrar Ativo</span>
                 <Select value={selectedAsset} onValueChange={setSelectedAsset}>
-                    <SelectTrigger className="w-full md:w-[250px] bg-black/50 border-red-900/30 text-white font-bold h-10">
+                    <SelectTrigger className="w-full md:w-[280px] bg-black/40 border-white/10 text-white font-bold h-10">
                         <SelectValue placeholder="Selecione..." />
                     </SelectTrigger>
-                    <SelectContent className="bg-black/95 border-red-900 text-white">
-                        <SelectItem value="GLOBAL" className="font-bold text-red-400">⚡ PORTFÓLIO GLOBAL</SelectItem>
+                    <SelectContent className="bg-[#0a0a0a] border-red-900/50 text-white">
+                        <SelectItem value="GLOBAL" className="font-black text-red-500 py-3">⚡ PORTFÓLIO GLOBAL</SelectItem>
                         {status?.openPositions?.map((pos) => (
-                            <SelectItem key={pos.symbol} value={pos.symbol} className="font-mono">
+                            <SelectItem key={pos.symbol} value={pos.symbol} className="font-mono text-gray-300">
                                 {pos.symbol}
                             </SelectItem>
                         ))}
@@ -231,176 +299,220 @@ const Dashboard = () => {
             </div>
         </div>
 
-        {metrics && (
-            <div className={`flex items-center gap-4 px-6 py-2 rounded-xl border ${metrics.pnl >= 0 ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
-                <div className="text-right">
-                    <p className={`text-[10px] font-bold uppercase ${metrics.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {metrics.isGlobal ? 'Resultado Aberto (PnL)' : 'Resultado da Operação'}
-                    </p>
-                    <div className="flex items-center justify-end gap-2">
-                        {metrics.pnl >= 0 ? <ArrowUpRight className="w-5 h-5 text-emerald-500" /> : <ArrowDownRight className="w-5 h-5 text-red-500" />}
-                        <span className={`text-2xl font-black font-mono tracking-tighter ${metrics.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {metrics.pnl >= 0 ? "+" : ""}{metrics.pnl.toFixed(2)}
-                        </span>
-                        <Badge variant="outline" className={`ml-2 font-bold ${metrics.pnl >= 0 ? 'border-emerald-500 text-emerald-400' : 'border-red-500 text-red-400'}`}>
-                            {metrics.pnlPercent.toFixed(2)}%
-                        </Badge>
-                    </div>
+        <div className="flex items-center gap-6 divide-x divide-white/10 w-full md:w-auto justify-end">
+            <div className="pl-6 text-right">
+                <p className="text-[10px] font-bold text-gray-500 uppercase">Resultado Aberto (PnL)</p>
+                <div className={`flex items-center justify-end gap-2 text-xl font-black font-mono tracking-tighter ${metrics.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {metrics.pnl >= 0 ? "+" : ""}{metrics.pnl.toFixed(2)}
+                    {metrics.pnl >= 0 ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
                 </div>
             </div>
-        )}
+        </div>
       </div>
 
-      {/* Grid */}
+      {/* --- KPI GRID --- */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         
-        <Card className="glass-panel p-6 relative overflow-hidden group hover:border-red-300 transition-all duration-300">
-          <div className="absolute right-0 top-0 w-32 h-32 bg-red-500/5 rounded-full blur-2xl -mr-10 -mt-10 transition-all group-hover:bg-red-500/10"></div>
+        {/* CARD 1: PATRIMÔNIO */}
+        <Card className="glass-panel p-6 relative overflow-hidden group hover:border-red-500/40 transition-all duration-300">
+          <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+            <TrendingUp className="w-20 h-20 text-red-500" />
+          </div>
+          <div>
+            <p className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-1">{metrics.title}</p>
+            <h3 className="text-4xl font-black text-white tracking-tight">${metrics.value.toFixed(2)}</h3>
+          </div>
+          <div className="h-12 w-full mt-4 opacity-40 group-hover:opacity-60 transition-opacity">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={equityData.slice(-10)}>
+                <Line type="monotone" dataKey="value" stroke="#ef4444" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+
+        {/* CARD 2: CAIXA / ALOCADO */}
+        <Card className="glass-panel p-6 relative overflow-hidden group hover:border-emerald-500/40 transition-all duration-300">
+           <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+            <Wallet className="w-20 h-20 text-emerald-500" />
+          </div>
           <div className="flex flex-col h-full justify-between relative z-10">
             <div>
-              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">{metrics?.title || "Carregando..."}</p>
-              <div className="flex items-center gap-2">
-                <h3 className="text-4xl font-black text-foreground">
-                  {metrics ? `$${metrics.value.toFixed(2)}` : "..."}
-                </h3>
-                {trend === 'up' && <TrendingUp className="w-6 h-6 text-primary animate-bounce" />}
-              </div>
+              <p className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-1">{metrics.subLabel}</p>
+              <h3 className="text-4xl font-black text-white tracking-tight">${metrics.subValue.toFixed(2)}</h3>
             </div>
-            <div className="mt-4 h-16 opacity-50">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={equityData}>
-                  <Line type="monotone" dataKey="value" stroke="#ef4444" strokeWidth={3} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
+            <div className="mt-6 flex items-center gap-2">
+                <div className="p-2 bg-emerald-500/10 rounded-lg border border-emerald-500/20">
+                    <DollarSign className="w-4 h-4 text-emerald-400" />
+                </div>
+                <span className="text-sm text-gray-400 font-medium">Líquido</span>
             </div>
           </div>
         </Card>
 
-        <Card className="glass-panel p-6 relative overflow-hidden group hover:border-red-300 transition-all duration-300">
-          <div className="absolute right-0 top-0 w-32 h-32 bg-red-500/5 rounded-full blur-2xl -mr-10 -mt-10 transition-all group-hover:bg-red-500/10"></div>
-          <div className="flex justify-between items-start relative z-10">
-            <div>
-              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider mb-2">{metrics?.subLabel || "..."}</p>
-              <h3 className="text-4xl font-black text-primary">
-                {metrics ? `$${metrics.subValue.toFixed(2)}` : "..."}
-              </h3>
-            </div>
-            <div className="p-3 bg-red-50 rounded-xl">
-              <DollarSign className="w-6 h-6 text-primary" />
-            </div>
-          </div>
-          <div className="mt-6 flex items-center gap-2 text-sm text-muted-foreground font-medium">
-            <Wallet className="w-4 h-4" />
-            <span>{selectedAsset === "GLOBAL" ? "Carteira Spot Binance" : "Alocado nesta ordem"}</span>
-          </div>
-        </Card>
-
-        <Card className="glass-panel p-6 flex items-center justify-between hover:border-red-300 transition-all duration-300">
-           <div className="space-y-4">
-              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider">Trades Hoje</p>
-              <div className="flex items-baseline gap-2">
-                <span className="text-5xl font-black text-foreground">{status?.dailyTrades || 0}</span>
-                <span className="text-lg font-bold text-muted-foreground">/ 10</span>
+        {/* CARD 3: META & WINRATE */}
+        <Card className="glass-panel p-1 flex items-center justify-between hover:border-amber-500/40 transition-all duration-300">
+           <div className="flex-1 p-5 h-full flex flex-col justify-center">
+              <div className="flex items-center gap-2 mb-2">
+                 <Target className="w-4 h-4 text-amber-500" />
+                 <p className="text-xs font-bold text-gray-500 uppercase tracking-widest">Meta Diária</p>
               </div>
-              <Badge className="bg-red-100 text-red-700 hover:bg-red-200 border-none px-3 py-1 text-xs font-bold">
-                <Target className="w-3 h-3 mr-1" /> META DIÁRIA
-              </Badge>
+              <div className="flex items-baseline gap-1">
+                <span className="text-4xl font-black text-white">{status?.dailyTrades || 0}</span>
+                <span className="text-sm font-bold text-gray-600">/ 10</span>
+              </div>
+              <div className="w-full bg-white/5 h-2 rounded-full mt-3 overflow-hidden">
+                <div 
+                    className="bg-amber-500 h-full transition-all duration-1000" 
+                    style={{ width: `${Math.min(((status?.dailyTrades || 0) / 10) * 100, 100)}%` }}
+                ></div>
+              </div>
            </div>
-           <div className="w-24 h-24 relative">
+           <div className="w-32 h-32 relative mr-2">
              <ResponsiveContainer width="100%" height="100%">
                <PieChart>
                  <Pie
                    data={winRateData.length > 0 ? winRateData : [{name: 'Empty', value: 1}]}
-                   innerRadius={30}
-                   outerRadius={40}
+                   innerRadius={35}
+                   outerRadius={50}
                    dataKey="value"
                    stroke="none"
+                   startAngle={90}
+                   endAngle={-270}
                  >
                    {winRateData.map((entry, index) => (
                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                    ))}
-                   {winRateData.length === 0 && <Cell fill="#fee2e2" />}
+                   {winRateData.length === 0 && <Cell fill="#333" />}
                  </Pie>
                </PieChart>
              </ResponsiveContainer>
-             <div className="absolute inset-0 flex items-center justify-center">
-                <Activity className="w-5 h-5 text-primary opacity-50" />
+             <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                <span className="text-xs font-bold text-gray-500">WIN RATE</span>
+                <span className={`text-lg font-black ${winRatePercent >= 50 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {winRatePercent.toFixed(0)}%
+                </span>
              </div>
            </div>
         </Card>
       </div>
 
-      {/* Gráfico Principal */}
-      <Card className="glass-panel p-6 border-red-100/80 shadow-2xl shadow-red-500/10">
+      {/* --- NOVA SEÇÃO: DETALHAMENTO FINANCEIRO (PROFIT VS LOSS) --- */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* CARD LUCRO BRUTO */}
+        <Card className="glass-panel p-6 border-l-4 border-l-emerald-500 flex items-center justify-between relative overflow-hidden hover:bg-emerald-500/5 transition-colors">
+            <div className="absolute right-0 top-0 p-4 opacity-5"><ArrowUpRight className="w-32 h-32 text-emerald-500" /></div>
+            <div className="relative z-10">
+                <p className="text-xs font-bold text-emerald-500/80 uppercase tracking-widest mb-1">Total Ganho (Gross Profit)</p>
+                <h3 className="text-3xl font-black text-emerald-400">
+                    +${metrics.grossProfit.toFixed(2)}
+                </h3>
+                <p className="text-xs text-gray-500 mt-2">Soma de todas as operações vencedoras</p>
+            </div>
+            <div className="p-3 bg-emerald-500/10 rounded-full border border-emerald-500/20">
+                <DollarSign className="w-6 h-6 text-emerald-400" />
+            </div>
+        </Card>
+
+        {/* CARD PREJUÍZO BRUTO */}
+        <Card className="glass-panel p-6 border-l-4 border-l-red-500 flex items-center justify-between relative overflow-hidden hover:bg-red-500/5 transition-colors">
+            <div className="absolute right-0 top-0 p-4 opacity-5"><ArrowDownRight className="w-32 h-32 text-red-500" /></div>
+            <div className="relative z-10">
+                <p className="text-xs font-bold text-red-500/80 uppercase tracking-widest mb-1">Total Perdido (Gross Loss)</p>
+                <h3 className="text-3xl font-black text-red-400">
+                    ${metrics.grossLoss.toFixed(2)}
+                </h3>
+                <p className="text-xs text-gray-500 mt-2">Soma de todas as operações perdedoras</p>
+            </div>
+            <div className="p-3 bg-red-500/10 rounded-full border border-red-500/20">
+                <Activity className="w-6 h-6 text-red-400" />
+            </div>
+        </Card>
+      </div>
+
+      {/* --- GRÁFICO PRINCIPAL --- */}
+      <Card className="glass-panel p-6 border-red-500/10 shadow-[0_0_50px_rgba(0,0,0,0.5)]">
         <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center">
-              <TrendingUp className="w-5 h-5 text-primary" />
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-red-600 to-black flex items-center justify-center shadow-lg border border-red-500/30">
+              <Activity className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h3 className="text-lg font-black text-foreground">
-                {selectedAsset === "GLOBAL" ? "CURVA DE PATRIMÔNIO GLOBAL" : `DESEMPENHO DO PORTFÓLIO (FOCANDO EM ${selectedAsset})`}
+              <h3 className="text-xl font-black text-white tracking-wide">
+                {selectedAsset === "GLOBAL" ? "CURVA DE CRESCIMENTO" : `PERFORMANCE: ${selectedAsset}`}
               </h3>
-              <p className="text-xs font-bold text-primary animate-pulse">● ATUALIZAÇÃO EM TEMPO REAL</p>
+              <div className="flex items-center gap-2 mt-1">
+                 <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                </span>
+                <p className="text-xs font-bold text-red-400">DADOS EM TEMPO REAL</p>
+              </div>
             </div>
           </div>
         </div>
         
-        <div className="h-[400px] w-full">
+        <div className="h-[450px] w-full relative">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={equityData}>
               <defs>
                 <linearGradient id="colorEquity" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.2}/>
-                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                  <stop offset="5%" stopColor="#dc2626" stopOpacity={0.3}/>
+                  <stop offset="95%" stopColor="#dc2626" stopOpacity={0}/>
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(239, 68, 68, 0.1)" vertical={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.05)" vertical={false} />
               <XAxis 
                 dataKey="time" 
-                stroke="#9ca3af" 
-                fontSize={12} 
+                stroke="#525252" 
+                fontSize={10} 
                 tickLine={false}
                 axisLine={false}
-                minTickGap={30}
-                fontWeight={500}
+                minTickGap={40}
+                fontWeight={700}
+                dy={10}
               />
               <YAxis 
                 domain={['auto', 'auto']} 
-                stroke="#9ca3af" 
-                fontSize={12} 
+                stroke="#525252" 
+                fontSize={10} 
                 tickLine={false}
                 axisLine={false}
                 tickFormatter={(val) => `$${val}`}
-                fontWeight={500}
+                fontWeight={700}
+                dx={-10}
               />
               <Tooltip 
                 contentStyle={{ 
-                  backgroundColor: "rgba(255, 255, 255, 0.95)", 
-                  border: "2px solid #fee2e2", 
-                  borderRadius: "1rem", 
-                  boxShadow: "0 10px 15px -3px rgba(220, 38, 38, 0.1)",
-                  fontWeight: "bold"
+                  backgroundColor: "#000", 
+                  border: "1px solid #333", 
+                  borderRadius: "8px",
+                  boxShadow: "0 10px 30px rgba(0,0,0,0.8)",
+                  fontWeight: "bold",
+                  color: "#fff"
                 }}
                 itemStyle={{ color: "#ef4444" }}
-                labelStyle={{ color: "#6b7280", marginBottom: "0.25rem", fontSize: "0.8rem" }}
+                labelStyle={{ color: "#6b7280", marginBottom: "0.25rem", fontSize: "0.7rem", textTransform: "uppercase" }}
+                cursor={{ stroke: '#ef4444', strokeWidth: 1, strokeDasharray: '5 5' }}
               />
               <Area 
                 type="monotone" 
                 dataKey="value" 
                 stroke="#ef4444" 
-                strokeWidth={4} 
+                strokeWidth={3} 
                 fill="url(#colorEquity)" 
-                animationDuration={1000}
+                animationDuration={1500}
+                activeDot={{ r: 6, fill: "#ef4444", stroke: "#fff", strokeWidth: 2 }}
               />
             </AreaChart>
           </ResponsiveContainer>
           
           {equityData.length === 0 && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center z-10">
-              <div className="p-4 bg-white/80 backdrop-blur rounded-2xl border border-red-100 shadow-xl text-center">
-                <Activity className="w-8 h-8 text-primary animate-spin mb-2 mx-auto" />
-                <p className="font-bold text-foreground">Sincronizando...</p>
+            <div className="absolute inset-0 flex flex-col items-center justify-center z-10 bg-black/20 backdrop-blur-sm rounded-xl">
+              <div className="p-6 bg-black border border-white/10 rounded-2xl shadow-2xl text-center">
+                <Zap className="w-10 h-10 text-red-500 animate-pulse mx-auto mb-3" />
+                <p className="font-bold text-white text-lg">Sincronizando Feed...</p>
+                <p className="text-gray-500 text-xs mt-1">Aguardando dados da Binance</p>
               </div>
             </div>
           )}

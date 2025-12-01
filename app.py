@@ -1007,6 +1007,59 @@ class RoboTrader:
             plan.append({'price_level': step_price, 'portion': frac, 'alloc_usd': step_alloc, 'qty': qty, 'done': False})
         return plan
 
+    #
+    # ---------------------- NEW HELPER: SAFE MODEL PREDICTION ----------------------
+    #
+    # Esse helper garante que o modelo receba um DataFrame com as mesmas colunas (e na mesma ordem)
+    # com que foi treinado (se disponível via model.feature_names_in_). Caso contrário, usa
+    # a lista de features carregada do meta.json. Preenche colunas ausentes com 0.
+    #
+    def _predict_proba_safe(self, model, meta_features: List[str], row: Dict[str, Any]):
+        """
+        Retorna array-like forecast de predict_proba (2d). Em caso de falha, retorna [[0.5,0.5]] como fallback.
+        """
+        try:
+            # Prioriza feature_names_in_ se disponível (sklearn)
+            if hasattr(model, 'feature_names_in_') and getattr(model, 'feature_names_in_', None) is not None:
+                feature_names = list(model.feature_names_in_)
+            else:
+                feature_names = list(meta_features or [])
+
+            if not feature_names:
+                # se não temos nomes, tentamos construir a data frame com as keys do row (fallback)
+                X = pd.DataFrame([row])
+            else:
+                # garante que todas as colunas existam e na ordem correta
+                data = {fn: row.get(fn, 0) for fn in feature_names}
+                X = pd.DataFrame([data], columns=feature_names)
+
+            # força conversão numérica quando possível
+            for c in X.columns:
+                try:
+                    X[c] = pd.to_numeric(X[c], errors='coerce').fillna(0.0)
+                except Exception:
+                    pass
+
+            if hasattr(model, 'predict_proba'):
+                proba = model.predict_proba(X)
+                return proba
+            else:
+                # modelo não tem predict_proba: tenta predict e converte para probabilidade artificial
+                if hasattr(model, 'predict'):
+                    pred = model.predict(X)
+                    # transforma 0/1 em prob 0.0/1.0 (fallback)
+                    p = float(pred[0]) if hasattr(pred, '__len__') else float(pred)
+                    return [[1.0 - p, p]]
+        except Exception:
+            # não crashar modelo; retornar fallback neutro
+            return [[0.5, 0.5]]
+
+        return [[0.5, 0.5]]
+
+    #
+    # -------------------------------------------------------------------------------
+    #
+
     def cycle(self):
         try:
             logger.info(f"--- Ciclo iniciado (Cash: {round(self.carteira.cash,4)} USDT) ---")
@@ -1164,13 +1217,20 @@ class RoboTrader:
                     try:
                         model_data = self.models[sym]
                         features = model_data.get('features', [])
-                        x = pd.DataFrame([{k: row.get(k, 0) for k in features}])
                         model = model_data['model']
+
+                        # <<< USAR O HELPER SEGURO PARA PREDIÇÃO (evita warnings do sklearn) >>>
                         if hasattr(model, 'predict_proba'):
-                            p_win = float(model.predict_proba(x)[0][1])
+                            proba = self._predict_proba_safe(model, features, row)
+                            try:
+                                p_win = float(proba[0][1])
+                            except Exception:
+                                p_win = 0.5
                             score = p_win
                         elif hasattr(model, 'predict'):
-                            score = float(model.predict(x)[0])
+                            # fallback: monta DataFrame com as features (ordem do meta)
+                            X = pd.DataFrame([{k: row.get(k, 0) for k in features}])
+                            score = float(model.predict(X)[0])
                             p_win = score
                         else:
                             p_win = 0.5

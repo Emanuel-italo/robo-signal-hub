@@ -35,12 +35,12 @@
 
     --radius: 1rem;
 
-    /* --- CORREÇÃO DO MENU LATERAL (SIDEBAR) --- */
-    --sidebar-background: 0 0% 3%;    /* Fundo do Menu: Preto */
-    --sidebar-foreground: 0 0% 98%;   /* Texto do Menu: Branco */
-    --sidebar-primary: 354 85% 55%;   /* Destaque: Vermelho */
+    /* --- SIDEBAR --- */
+    --sidebar-background: 0 0% 3%;
+    --sidebar-foreground: 0 0% 98%;
+    --sidebar-primary: 354 85% 55%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 354 30% 10%;    /* Hover do Menu: Vermelho Escuro */
+    --sidebar-accent: 354 30% 10%;
     --sidebar-accent-foreground: 0 0% 98%;
     --sidebar-border: 354 10% 12%;
     --sidebar-ring: 354 85% 55%;
@@ -53,10 +53,33 @@
   }
   body {
     @apply bg-background text-foreground font-sans antialiased;
-    /* Grid Tech de Fundo */
-    background-image: linear-gradient(to right, rgba(220, 38, 38, 0.08) 1px, transparent 1px),
-                      linear-gradient(to bottom, rgba(220, 38, 38, 0.08) 1px, transparent 1px);
-    background-size: 40px 40px;
+    /* Grid Tech de Fundo - Refinado */
+    background-image: 
+        linear-gradient(to right, rgba(220, 38, 38, 0.05) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(220, 38, 38, 0.05) 1px, transparent 1px);
+    background-size: 50px 50px;
+  }
+  
+  /* --- CUSTOM SCROLLBAR (NOVO) --- */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.3);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(220, 38, 38, 0.2);
+    border-radius: 4px;
+    transition: background 0.2s;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(220, 38, 38, 0.5);
+  }
+  
+  /* Classe utilitária para contêineres que precisam de scroll */
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
   }
 }
 
@@ -71,7 +94,11 @@
   animation: float 3s ease-in-out infinite;
 }
 
-/* Efeito de Vidro Escuro */
+/* Efeito de Vidro Escuro - Melhorado */
 .glass-panel {
-  @apply bg-black/60 backdrop-blur-xl border border-red-900/20 shadow-2xl shadow-red-900/10;
+  @apply bg-black/60 backdrop-blur-xl border border-red-900/20 shadow-2xl shadow-black/50 transition-all duration-300;
+}
+
+.glass-panel:hover {
+  @apply border-red-500/30 shadow-[0_0_20px_rgba(220,38,38,0.1)];
 }
