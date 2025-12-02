@@ -94,9 +94,10 @@ CONFIG = {
     },
     'symbols': [
         'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT',
-        'AVAX/USDT', 'DOT/USDT', 'TRX/USDT', 'LINK/USDT', 'MATIC/USDT', 'ATOM/USDT',
-        'NEAR/USDT', 'ALGO/USDT', 'ICP/USDT', 'FTM/USDT', 'APT/USDT', 'SUI/USDT',
-        'ARB/USDT', 'OP/USDT', 'IMX/USDT', 'DOGE/USDT', 'SHIB/USDT', 'PEPE/USDT'
+        'AVAX/USDT', 'DOT/USDT', 'TRX/USDT', 'LINK/USDT', 'ATOM/USDT', # REMOVIDO: MATIC
+        'NEAR/USDT', 'ALGO/USDT', 'ICP/USDT', 'APT/USDT', 'SUI/USDT',  # REMOVIDO: FTM
+        'ARB/USDT', 'OP/USDT', 'IMX/USDT', 'DOGE/USDT', 'SHIB/USDT', 'PEPE/USDT',
+        'POL/USDT'
     ],
     # --- MODO REAL ---
     'paper_trading': False,  # <--- AGORA É REAL (mude para True para testes)
@@ -110,7 +111,7 @@ CONFIG = {
     'sleep_cycle': 60,
 
     # --- GERENCIAMENTO DE RISCO (AJUSTADO PARA BANCA PEQUENA) ---
-    'max_positions': 2,        # Quantas posições simultâneas
+    'max_positions': 5,        # Quantas posições simultâneas
     'stop_loss_mult': 2.5,
     'take_profit_mult': 5.0,
     'risk_per_trade': 0.02,    # 2% do patrimônio por trade (ajustável)
@@ -153,9 +154,9 @@ CONFIG = {
 
     # --- OPÇÃO C (NOVOS PARÂMETROS) ---
     # Entrada escalonada (pyramiding) - frações que somam 1.0
-    'entry_steps': [0.5, 0.3, 0.2],
+    'entry_steps': [1.0],
     # espaçamento entre steps em múltiplos de ATR (ex.: primeiro step já, 2nd = -1.5 ATR, 3rd = -2.5 ATR)
-    'entry_step_spacing_atr': [0.0, 1.5, 2.5],
+    'entry_step_spacing_atr': [0.0],
     # trailing stop multiplier baseado em ATR
     'trailing_atr_multiplier': 1.0,
     # break-even: depois de X * ATR de lucro, move stop para entry (ou entry + tiny buffer)

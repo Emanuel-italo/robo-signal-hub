@@ -11,10 +11,11 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line
 } from "recharts";
-import { api, BotStatus } from "@/services/api"; 
+// Mantendo importações relativas para evitar erros de build
+import { api, BotStatus } from "../../services/api"; 
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { useWakeLock } from "@/hooks/use-wake-lock";
+import { useWakeLock } from "../../hooks/use-wake-lock";
 import MarketTicker from "./MarketTicker";
 
 interface ChartData {
@@ -48,14 +49,43 @@ const Dashboard = () => {
   
   // Controle de Som
   const [soundEnabled, setSoundEnabled] = useState(true);
+  
+  // Referências para controle de áudio e eventos (CORREÇÃO DO LOOP/DURAÇÃO)
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastProcessedEventRef = useRef<string | null>(null);
 
-  // --- ÁUDIO SYSTEM ---
+  // --- SISTEMA DE ÁUDIO INTELIGENTE ---
   const playSound = (type: 'buy' | 'win' | 'loss') => {
     if (!soundEnabled) return;
+
+    // 1. Limpa qualquer som que esteja tocando antes de começar o novo
+    if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+    }
+    if (audioTimeoutRef.current) {
+        clearTimeout(audioTimeoutRef.current);
+    }
+
     try {
         const audio = new Audio(`/sounds/${type}.mp3`);
         audio.volume = 0.5;
-        audio.play().catch(e => console.log("Erro ao reproduzir som (verifique se os arquivos existem em public/sounds/):", e));
+        audioRef.current = audio;
+
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(e => console.log("Erro ao reproduzir (interação necessária ou arquivo ausente):", e));
+        }
+
+        // 2. Trava de Segurança: Para o som EXATAMENTE após 11 segundos
+        audioTimeoutRef.current = setTimeout(() => {
+            if (audioRef.current === audio) { // Garante que estamos parando o som certo
+                audio.pause();
+                audio.currentTime = 0;
+            }
+        }, 11000); // 11000ms = 11 segundos
+
     } catch (error) {
         console.error("Audio error", error);
     }
@@ -66,20 +96,27 @@ const Dashboard = () => {
     if (status?.lastEvent) {
       const evt = status.lastEvent;
       
-      // Lógica de Som e Toast
-      if (evt.type === 'BUY') {
-        playSound('buy');
-        toast.success(`COMPRA EXECUTADA: ${evt.symbol}`, {
-          description: `Entrada em $${evt.price?.toFixed(2)}`,
-          className: "bg-black border-2 border-red-500/50 text-white font-bold"
-        });
-      } else if (evt.type === 'SELL') {
-        const isWin = (evt.pnl || 0) > 0;
-        playSound(isWin ? 'win' : 'loss');
-        toast(isWin ? "LUCRO REALIZADO!" : "STOP LOSS", {
-          description: `${evt.symbol} PnL: $${evt.pnl?.toFixed(2)}`,
-          className: isWin ? "bg-emerald-950 border-emerald-500 text-emerald-400" : "bg-red-950 border-red-500 text-red-400"
-        });
+      // Assinatura única baseada no conteúdo do evento
+      const eventSignature = JSON.stringify(evt);
+
+      // Só processa se for um evento novo
+      if (eventSignature !== lastProcessedEventRef.current) {
+          lastProcessedEventRef.current = eventSignature;
+
+          if (evt.type === 'BUY') {
+            playSound('buy');
+            toast.success(`COMPRA EXECUTADA: ${evt.symbol}`, {
+              description: `Entrada em $${evt.price?.toFixed(2)}`,
+              className: "bg-black border-2 border-red-500/50 text-white font-bold"
+            });
+          } else if (evt.type === 'SELL') {
+            const isWin = (evt.pnl || 0) > 0;
+            playSound(isWin ? 'win' : 'loss');
+            toast(isWin ? "LUCRO REALIZADO!" : "STOP LOSS", {
+              description: `${evt.symbol} PnL: $${evt.pnl?.toFixed(2)}`,
+              className: isWin ? "bg-emerald-950 border-emerald-500 text-emerald-400" : "bg-red-950 border-red-500 text-red-400"
+            });
+          }
       }
     }
   }, [status?.lastEvent]);
@@ -95,11 +132,12 @@ const Dashboard = () => {
     if (status?.equity) {
       const now = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       setEquityData(prev => {
+        if (prev.length > 0 && prev[prev.length - 1].time === now) return prev;
         const newData = [...prev, { time: now, value: status.equity }];
         return newData.slice(-40); 
       });
     }
-  }, [status]);
+  }, [status?.equity]);
 
   // Atualiza Dados de Win Rate
   useEffect(() => {
@@ -124,8 +162,7 @@ const Dashboard = () => {
         await api.stopBot();
       } else {
         await api.startBot();
-        // Toca um som de "start" (pode usar o buy ou win como feedback)
-        playSound('buy');
+        playSound('buy'); // Feedback sonoro ao iniciar
       }
       setTimeout(() => refetchStatus(), 500);
     } catch (error) {
@@ -134,7 +171,7 @@ const Dashboard = () => {
     }
   };
 
-  // --- CÁLCULOS FINANCEIROS DETALHADOS ---
+  // --- CÁLCULOS FINANCEIROS DETALHADOS (LUCRO vs PREJUÍZO) ---
   const metrics = useMemo(() => {
     if (!status) return null;
 
@@ -157,7 +194,7 @@ const Dashboard = () => {
         };
     } else {
         const pos = positions.find(p => p.symbol === selectedAsset);
-        if (!pos) return null; // Retorna null se o ativo não existir
+        if (!pos) return null;
 
         baseMetrics = {
             title: `POSIÇÃO: ${pos.symbol}`,
@@ -207,7 +244,14 @@ const Dashboard = () => {
       }
   }, [status, selectedAsset]);
 
-  if (!metrics) return <div className="p-10 text-center text-white animate-pulse">Carregando dados do sistema...</div>;
+  if (!metrics) return (
+    <div className="flex h-screen items-center justify-center bg-black">
+        <div className="text-center space-y-4">
+            <Activity className="w-12 h-12 text-red-500 animate-spin mx-auto" />
+            <p className="text-white font-bold animate-pulse">Carregando Sistemas...</p>
+        </div>
+    </div>
+  );
 
   return (
     <div className="space-y-6 animate-in fade-in zoom-in-95 duration-700 pb-10">
@@ -246,14 +290,14 @@ const Dashboard = () => {
                 </div>
             </div>
             
-            <div className="flex gap-3">
+            <div className="flex gap-3 relative z-10">
                  <Button
                     variant="outline"
                     size="icon"
                     onClick={() => setSoundEnabled(!soundEnabled)}
-                    className="h-14 w-14 rounded-xl border-white/10 bg-black/40 text-white hover:bg-white/10 hover:text-red-400 transition-colors"
+                    className={`h-14 w-14 rounded-xl border-white/10 bg-black/40 hover:bg-white/10 transition-colors ${soundEnabled ? 'text-emerald-400' : 'text-red-400'}`}
                  >
-                    {soundEnabled ? <Volume2 className="w-6 h-6" /> : <VolumeX className="w-6 h-6 text-gray-500" />}
+                    {soundEnabled ? <Volume2 className="w-6 h-6" /> : <VolumeX className="w-6 h-6" />}
                  </Button>
 
                 <Button 
@@ -284,7 +328,7 @@ const Dashboard = () => {
             <div className="flex-1 md:flex-none">
                 <span className="text-[10px] text-gray-500 font-bold uppercase block mb-1">Filtrar Ativo</span>
                 <Select value={selectedAsset} onValueChange={setSelectedAsset}>
-                    <SelectTrigger className="w-full md:w-[280px] bg-black/40 border-white/10 text-white font-bold h-10">
+                    <SelectTrigger className="w-full md:w-[280px] bg-black/40 border-white/10 text-white font-bold h-10 focus:ring-red-500/50">
                         <SelectValue placeholder="Selecione..." />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0a0a0a] border-red-900/50 text-white">
@@ -299,12 +343,13 @@ const Dashboard = () => {
             </div>
         </div>
 
+        {/* ÁREA DE RESULTADO (PnL) AUMENTADA AQUI */}
         <div className="flex items-center gap-6 divide-x divide-white/10 w-full md:w-auto justify-end">
             <div className="pl-6 text-right">
-                <p className="text-[10px] font-bold text-gray-500 uppercase">Resultado Aberto (PnL)</p>
-                <div className={`flex items-center justify-end gap-2 text-xl font-black font-mono tracking-tighter ${metrics.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                <p className="text-sm font-bold text-gray-500 uppercase tracking-widest mb-1">Resultado Aberto (PnL)</p>
+                <div className={`flex items-center justify-end gap-3 text-5xl font-black font-mono tracking-tighter ${metrics.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {metrics.pnl >= 0 ? "+" : ""}{metrics.pnl.toFixed(2)}
-                    {metrics.pnl >= 0 ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
+                    {metrics.pnl >= 0 ? <ArrowUpRight className="w-8 h-8 text-emerald-500" /> : <ArrowDownRight className="w-8 h-8 text-red-500" />}
                 </div>
             </div>
         </div>
@@ -324,7 +369,7 @@ const Dashboard = () => {
           </div>
           <div className="h-12 w-full mt-4 opacity-40 group-hover:opacity-60 transition-opacity">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={equityData.slice(-10)}>
+              <LineChart data={equityData.slice(-15)}>
                 <Line type="monotone" dataKey="value" stroke="#ef4444" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
@@ -345,7 +390,7 @@ const Dashboard = () => {
                 <div className="p-2 bg-emerald-500/10 rounded-lg border border-emerald-500/20">
                     <DollarSign className="w-4 h-4 text-emerald-400" />
                 </div>
-                <span className="text-sm text-gray-400 font-medium">Líquido</span>
+                <span className="text-sm text-gray-400 font-medium">Líquido Disponível</span>
             </div>
           </div>
         </Card>
@@ -397,35 +442,35 @@ const Dashboard = () => {
         </Card>
       </div>
 
-      {/* --- NOVA SEÇÃO: DETALHAMENTO FINANCEIRO (PROFIT VS LOSS) --- */}
+      {/* --- DETALHAMENTO FINANCEIRO (PROFIT VS LOSS) --- */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* CARD LUCRO BRUTO */}
-        <Card className="glass-panel p-6 border-l-4 border-l-emerald-500 flex items-center justify-between relative overflow-hidden hover:bg-emerald-500/5 transition-colors">
-            <div className="absolute right-0 top-0 p-4 opacity-5"><ArrowUpRight className="w-32 h-32 text-emerald-500" /></div>
+        <Card className="glass-panel p-6 border-l-4 border-l-emerald-500 flex items-center justify-between relative overflow-hidden hover:bg-emerald-500/5 transition-colors group">
+            <div className="absolute right-0 top-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity"><ArrowUpRight className="w-32 h-32 text-emerald-500" /></div>
             <div className="relative z-10">
                 <p className="text-xs font-bold text-emerald-500/80 uppercase tracking-widest mb-1">Total Ganho (Gross Profit)</p>
                 <h3 className="text-3xl font-black text-emerald-400">
                     +${metrics.grossProfit.toFixed(2)}
                 </h3>
-                <p className="text-xs text-gray-500 mt-2">Soma de todas as operações vencedoras</p>
+                <p className="text-xs text-gray-500 mt-2 font-medium">Soma de todas as operações vencedoras</p>
             </div>
-            <div className="p-3 bg-emerald-500/10 rounded-full border border-emerald-500/20">
-                <DollarSign className="w-6 h-6 text-emerald-400" />
+            <div className="p-4 bg-emerald-500/10 rounded-full border border-emerald-500/20 shadow-[0_0_15px_rgba(16,185,129,0.2)]">
+                <DollarSign className="w-8 h-8 text-emerald-400" />
             </div>
         </Card>
 
         {/* CARD PREJUÍZO BRUTO */}
-        <Card className="glass-panel p-6 border-l-4 border-l-red-500 flex items-center justify-between relative overflow-hidden hover:bg-red-500/5 transition-colors">
-            <div className="absolute right-0 top-0 p-4 opacity-5"><ArrowDownRight className="w-32 h-32 text-red-500" /></div>
+        <Card className="glass-panel p-6 border-l-4 border-l-red-500 flex items-center justify-between relative overflow-hidden hover:bg-red-500/5 transition-colors group">
+            <div className="absolute right-0 top-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity"><ArrowDownRight className="w-32 h-32 text-red-500" /></div>
             <div className="relative z-10">
                 <p className="text-xs font-bold text-red-500/80 uppercase tracking-widest mb-1">Total Perdido (Gross Loss)</p>
                 <h3 className="text-3xl font-black text-red-400">
                     ${metrics.grossLoss.toFixed(2)}
                 </h3>
-                <p className="text-xs text-gray-500 mt-2">Soma de todas as operações perdedoras</p>
+                <p className="text-xs text-gray-500 mt-2 font-medium">Soma de todas as operações perdedoras</p>
             </div>
-            <div className="p-3 bg-red-500/10 rounded-full border border-red-500/20">
-                <Activity className="w-6 h-6 text-red-400" />
+            <div className="p-4 bg-red-500/10 rounded-full border border-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.2)]">
+                <Activity className="w-8 h-8 text-red-400" />
             </div>
         </Card>
       </div>
