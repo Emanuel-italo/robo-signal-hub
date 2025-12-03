@@ -162,11 +162,7 @@ CONFIG = {
     # break-even: depois de X * ATR de lucro, move stop para entry (ou entry + tiny buffer)
     'break_even_profit_atr': 1.0,
     # take profit tiers adicionais (mantidos como Fallback se quiser modificar)
-    'take_profit_tiers': [
-        {'pct': 0.015, 'portion': 0.4},
-        {'pct': 0.03, 'portion': 0.3},
-        {'pct': 0.06, 'portion': 0.3},
-    ],
+    'take_profit_tiers': [],
     # Média móvel adaptativa (KAMA) params
     'adaptive_ma': {'n': 10, 'fast': 2, 'slow': 30},
 
