@@ -115,7 +115,7 @@ CONFIG = {
     'stop_loss_mult': 2.5,
     'take_profit_mult': 5.0,
     'risk_per_trade': 0.02,    # 2% do patrimônio por trade (ajustável)
-    'min_trade_usd': 5.5,      # mínimo da Binance (deixe > 5)
+    'min_trade_usd': 6.0,      # mínimo da Binance (deixe > 5)
     'max_daily_trades': 25,
     'min_volume_quote': 5000.0,
     'slippage_pct': 0.0015,
@@ -127,7 +127,7 @@ CONFIG = {
     'diversify': True,
     'allocation_mode': 'proportional',  # 'proportional' ou 'equal'
     'allocation_buffer_pct': 0.10,  # Mantém 10% do cash como buffer para fees/ordens
-    'min_allocation_per_slot': 5.5,  # mesmo que min_trade_usd (segurança)
+    'min_allocation_per_slot': 6.5,  # mesmo que min_trade_usd (segurança)
 
     # comportamento automático para "dust" (quantias menores que min_amount da exchange)
     'auto_clean_dust': True,  # se True: limpa posições locais com quantia < min_amount (evita loop)
@@ -140,8 +140,8 @@ CONFIG = {
     'max_drawdown_pct': 0.20,          # se drawdown > 20% pausa entradas
 
     # VENDA AO ALCANÇAR LUCRO (LOCK PROFIT)
-    'min_profit_usd': 0.10,   # padrão conservador (ajuste conforme sua preferência)
-    'min_profit_pct': 0.005,  # 0.5% do capital investido na posição
+    'min_profit_usd': 0.50,   # padrão conservador (ajuste conforme sua preferência)
+    'min_profit_pct': 0.015,  # 0.5% do capital investido na posição
 
     # Logging
     'verbose_logs': False,  # se True mostra muitos logs; se False, apenas logs relevantes
@@ -1149,8 +1149,8 @@ class RoboTrader:
                 unreal_pnl = (price - entry_price) * quantity
                 unreal_pct = (unreal_pnl / invested) if invested and invested > 0 else 0.0
 
-                min_profit_usd = CONFIG.get('min_profit_usd', 0.10)
-                min_profit_pct = CONFIG.get('min_profit_pct', 0.005)
+                min_profit_usd = CONFIG.get('min_profit_usd', 0.50)
+                min_profit_pct = CONFIG.get('min_profit_pct', 0.015)
 
                 reason = None
                 if unreal_pnl >= min_profit_usd or unreal_pct >= min_profit_pct:
