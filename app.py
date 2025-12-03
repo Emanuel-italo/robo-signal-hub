@@ -112,7 +112,8 @@ CONFIG = {
 
     # --- GERENCIAMENTO DE RISCO (AJUSTADO PARA BANCA PEQUENA) ---
     'max_positions': 5,        # Quantas posições simultâneas
-    'stop_loss_mult': 2.5,
+    # Stop Loss desativado na lógica (ver abaixo), mantido aqui apenas config legado
+    'stop_loss_mult': 999.0,   # Valor alto para garantir que não acione por acidente
     'take_profit_mult': 5.0,
     'risk_per_trade': 0.02,    # 2% do patrimônio por trade (ajustável)
     'min_trade_usd': 6.0,      # mínimo da Binance (deixe > 5)
@@ -581,7 +582,7 @@ class Carteira:
             return True
 
     # --- FIX: melhorar tratamento de precision/min_amount antes de vender ---
-    def reduzir_posicao(self, symbol, qty_to_sell, exit_price, reason="TP"):
+    def reduzir_posicao(self, symbol, qty_to_sell, exit_price, reason="TP", current_price=None):
         """Vende uma fração da posição (market sell) e atualiza pos local. Retorna record do fechamento parcial/completo.
         """
         with self.lock:
@@ -618,25 +619,21 @@ class Carteira:
                     qty_to_attempt = max(0.0, qty_to_attempt - epsilon)
 
                     if qty_to_attempt <= 0:
-                        logger.error("Saldo em ativo base insuficiente para vender (redução)", symbol=symbol, needed=sell_qty, available=available_base)
+                        logger.error("Saldo em carteira insuficiente/zerado para vender", symbol=symbol, available=available_base)
+                        # força limpeza se for poeira
+                        if available_base < 1e-5: 
+                             self.posicoes.pop(symbol, None)
+                             self.salvar()
                         return None
 
-                    # --- FIX: obter min_amount e amount_precision do mercado ---
-                    min_amount, amount_precision = self._get_market_limits_and_precision(symbol)
-                    # se exchange oferece helper, prioriza
+                    # --- CORREÇÃO DE PRECISÃO E MIN_NOTIONAL ---
+                    # Para evitar erro Filter failure: NOTIONAL ou LOT_SIZE
+                    market = self.exchange.market(symbol)
+                    min_amount, amount_precision = self._get_min_lot_size(market)
+                    
+                    # tenta usar amount_to_precision se disponível
                     try:
-                        if hasattr(self.exchange, 'amount_to_precision'):
-                            # amount_to_precision pode levantar erro para quantias menores que precision/limits
-                            qp = self.exchange.amount_to_precision(symbol, qty_to_attempt)
-                            qty_to_attempt = float(qp)
-                        else:
-                            # se tiver amount_precision, aplica floor para essa precisão
-                            if amount_precision is not None:
-                                # amount_precision é número de casas decimais no amount (ex: 1 => integers)
-                                step = Decimal('1').scaleb(-amount_precision)  # 10**(-amount_precision)
-                                dqty = Decimal(str(qty_to_attempt))
-                                floored = (dqty // step) * step
-                                qty_to_attempt = float(floored.quantize(step, rounding=ROUND_DOWN))
+                        qty_to_attempt = float(self.exchange.amount_to_precision(symbol, qty_to_attempt))
                     except Exception:
                         # se amount_to_precision falhar, aplicamos fallback manual
                         if amount_precision is not None:
@@ -678,90 +675,62 @@ class Carteira:
 
                     # final: cria ordem de venda de mercado com qty_to_attempt
                     order = self.exchange.create_order(symbol, 'market', 'sell', qty_to_attempt)
-                    executed_qty = float(order.get('filled') or order.get('amount') or qty_to_attempt)
-                    real_exit_price = float(order.get('average') if order.get('average') else exit_price)
-
+                    
+                    # Se deu certo, atualizamos localmente
+                    filled_qty = float(order.get('filled') or order.get('amount') or qty_to_attempt)
+                    exec_price = float(order.get('average') or exit_price)
                     time.sleep(1)
                     self.sync_balance()
+
                 except Exception as e:
-                    # --- FIX: registrar mensagem mais detalhada (mantendo formato anterior) ---
                     logger.error("ERRO CRÍTICO AO VENDER NA BINANCE (redução)", symbol=symbol, error=str(e))
                     return None
             else:
-                executed_qty = float(sell_qty)
-                real_exit_price = float(exit_price)
-                self.cash += (real_exit_price * executed_qty)
+                # Paper trading
+                filled_qty = float(qty_to_sell)
+                exec_price = float(exit_price)
+                cost = filled_qty * exec_price
+                self.cash += cost
 
-            # atualiza posição local
-            remaining_qty = max(0.0, quantity - executed_qty)
-            revenue = real_exit_price * executed_qty
-            pnl = revenue - (pos.get('entry_price', 0.0) * executed_qty)
-
-            # registra histórico da parte vendida
+            # Atualiza posição local
+            remaining_qty = quantity - filled_qty
+            entry_price = pos['entry_price']
+            
+            # PnL do trecho vendido
+            pnl = (exec_price - entry_price) * filled_qty
+            # Ajusta invested proporcionalmente
+            invested_before = pos.get('invested', 0.0)
+            invested_after = invested_before * (remaining_qty / quantity) if quantity > 0 else 0.0
+            
             record = {
                 'symbol': symbol,
-                'entry_price': pos.get('entry_price'),
-                'exit_price': real_exit_price,
-                'quantity': executed_qty,
+                'entry_price': entry_price,
+                'exit_price': exec_price,
+                'quantity': filled_qty,
                 'pnl': pnl,
                 'reason': reason,
                 'timestamp': str(datetime.datetime.now())
             }
-            # Append ao histórico e salva
             self.historico.append(record)
-            self.last_event = {'symbol': symbol, 'type': 'SELL_PARTIAL' if remaining_qty > 0 else 'SELL', 'pnl': pnl, 'reason': reason}
-            self.daily_trades += 1
+            self.last_event = {'symbol': symbol, 'type': 'SELL', 'price': exec_price, 'pnl': pnl, 'reason': reason}
 
-            if remaining_qty > 0:
-                pos['quantity'] = float(remaining_qty)
-                pos['invested'] = float(pos.get('entry_price', 0.0) * remaining_qty)
-                self.posicoes[symbol] = pos
-                self.salvar()
-                logger.warning("Venda parcial executada; posição atualizada", symbol=symbol, sold=executed_qty, remaining=remaining_qty)
-            else:
-                # posição fechada completamente
+            if remaining_qty <= (1e-6): # se sobrou quase nada, remove
                 self.posicoes.pop(symbol, None)
-                self.salvar()
-                log_func = logger.success if pnl > 0 else logger.warning
-                log_func(f"VENDA ({'Lucro' if pnl > 0 else 'Prejuízo'})", symbol=symbol, pnl=f"${pnl:.2f}", reason=reason)
+                logger.success("Posição FECHADA", symbol=symbol, pnl=round(pnl, 4), reason=reason)
+            else:
+                pos['quantity'] = float(remaining_qty)
+                pos['invested'] = float(invested_after)
+                self.posicoes[symbol] = pos
+                logger.success("Posição REDUZIDA", symbol=symbol, sold=filled_qty, left=remaining_qty, pnl=round(pnl, 4))
 
-            # salva sample para aprendizado
-            try:
-                features = {
-                    'entry_price': pos.get('entry_price'),
-                    'exit_price': real_exit_price,
-                    'atr': pos.get('atr'),
-                    'quantity': executed_qty,
-                    'reason': reason
-                }
-                self._save_sample(symbol, features, 1 if pnl > 0 else 0)
-            except Exception:
-                pass
-
+            self.salvar()
             return record
 
-    # ----- helpers para min_amount / precision (necessário para evitar erros de dust) -----
-    def _ensure_markets_loaded(self):
+    def _get_min_lot_size(self, market):
+        # Tenta extrair min amount e precision do market info da ccxt
         try:
-            if hasattr(self.exchange, 'markets') and not self.exchange.markets:
-                try:
-                    self.exchange.load_markets(True)
-                except Exception:
-                    try:
-                        self.exchange.load_markets()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    def _get_market_limits_and_precision(self, symbol):
-        try:
-            self._ensure_markets_loaded()
-            markets = getattr(self.exchange, 'markets', None) or {}
-            market = markets.get(symbol) or markets.get(symbol.replace('/', ''))
-            if market:
-                limits = market.get('limits', {}) or {}
-                amount_limits = limits.get('amount') or {}
+            if 'limits' in market:
+                amount_limits = market['limits'].get('amount', {})
                 min_amount = amount_limits.get('min')
                 precision = market.get('precision', {}) or {}
                 amount_precision = precision.get('amount')
@@ -1093,52 +1062,11 @@ class RoboTrader:
                 self.market_prices[sym] = price
                 pos = self.carteira.posicoes[sym]
 
-                atr = pos.get('atr') or 0.0
-                # Trailing stop inteligente (baseado em ATR)
-                trailing_mult = CONFIG.get('trailing_atr_multiplier', 1.0)
-                if atr and atr > 0:
-                    new_trail = price - (atr * trailing_mult)
-                    if pos.get('trail_stop') is None or new_trail > pos.get('trail_stop'):
-                        pos['trail_stop'] = new_trail
-
-                # Break-even automático
-                be_atr = CONFIG.get('break_even_profit_atr', 1.0)
-                if atr and atr > 0:
-                    be_trigger_price = pos.get('entry_price') + (be_atr * atr)
-                    # adiciona tiny buffer para fees
-                    tiny_buf = 0.0005 * pos.get('entry_price', 0.0)
-                    if price >= be_trigger_price:
-                        # move stop para entry + tiny_buf se stop inferior
-                        new_stop = max(pos.get('stop_price') or 0.0, pos.get('entry_price') + tiny_buf)
-                        if pos.get('stop_price') is None or new_stop > pos.get('stop_price'):
-                            pos['stop_price'] = new_stop
-
-                # Saída parcial: verifica tiers e executa redução quando atingido
-                # usar take_profit_tiers do CONFIG ou take_price simples
-                tiers = CONFIG.get('take_profit_tiers', [])
-                # também suporta pos['take_price'] como fallback single TP
-                for i, tier in enumerate(tiers):
-                    tier_marker = f"tier_{i}"
-                    if tier_marker in pos.get('tp_executed', []):
-                        continue
-                    # calcula target price absoluto: porcentagem relativa ao entry
-                    tp_price = pos.get('entry_price') * (1.0 + tier.get('pct', 0.0))
-                    if price >= tp_price:
-                        # vende portion * current quantity
-                        portion = tier.get('portion', 0.0)
-                        qty_to_sell = pos.get('quantity', 0.0) * portion
-                        if qty_to_sell > 0:
-                            rec = self.carteira.reduzir_posicao(sym, qty_to_sell, price, reason=f"TP_tier_{i}")
-                            if rec:
-                                metrics.record_trade(rec['pnl'])
-                                # marca tier como executada
-                                pos = self.carteira.posicoes.get(sym, {})
-                                # se posição foi completamente fechada, break
-                                if sym not in self.carteira.posicoes:
-                                    break
-                                pos.setdefault('tp_executed', []).append(tier_marker)
-
-                # LOCK PROFIT e stops finais
+                # --- LÓGICA HOLD-FOREVER (NÃO VENDER NO PREJUÍZO) ---
+                # Removemos a lógica antiga de Stop Loss / Trailing Stop automático que gerava perda
+                # O robô agora só vende se houver LUCRO (Lock Profit) ou se atingir Take Profit positivo
+                
+                # LOCK PROFIT (Venda com Lucro)
                 entry_price = pos.get('entry_price', 0.0)
                 quantity = pos.get('quantity', 0.0)
                 invested = pos.get('invested', entry_price * quantity)
@@ -1149,20 +1077,27 @@ class RoboTrader:
                 min_profit_pct = CONFIG.get('min_profit_pct', 0.015)
 
                 reason = None
+                
+                # Só vende se estiver no lucro e acima dos mínimos configurados
                 if unreal_pnl >= min_profit_usd or unreal_pct >= min_profit_pct:
-                    reason = "LOCK PROFIT"
+                    reason = "LOCK PROFIT (LUCRO ATINGIDO)"
 
-                # fallback stops
-                if reason is None:
-                    if pos.get('stop_price') and price <= pos['stop_price']:
-                        reason = "STOP LOSS"
-                    elif pos.get('trail_stop') and price <= pos['trail_stop']:
-                        reason = "TRAILING STOP"
+                # Fallback: Take Profit Tradicional (Preço Alvo) - Também é lucro
+                take_price = pos.get('take_price')
+                if take_price and price >= take_price:
+                     # Dupla verificação: só executa TP se o PnL for positivo
+                     if unreal_pnl > 0:
+                        reason = "TAKE PROFIT (ALVO ATINGIDO)"
 
                 if reason:
+                    # Se caiu aqui, é lucro garantido
                     rec = self.carteira.reduzir_posicao(sym, pos.get('quantity', 0.0), price, reason=reason)
                     if rec:
                         metrics.record_trade(rec['pnl'])
+                
+                # NOTA: Removemos os blocos "else if stop_loss" e "else if trailing_stop"
+                # Assim, se a moeda cair, o robô não faz NADA. Ele segura (Hold) até subir.
+
             except Exception:
                 # não poluir logs
                 pass
@@ -1326,198 +1261,202 @@ class RoboTrader:
                 weight = max(0.0, c['ev_per_usd'])
                 if weight == 0:
                     weight = c['score']
-                alloc = (weight / total_score) * available_cash
+                alloc = available_cash * (weight / total_score)
+            
+            # garantir mín allocation
             if alloc < CONFIG['min_allocation_per_slot']:
-                alloc = CONFIG['min_allocation_per_slot']
-            allocations.append(max(0.0, alloc))
+                alloc = 0.0
+            
+            allocations.append((c, alloc))
 
-        total_alloc = sum(allocations)
-        if total_alloc > available_cash:
-            factor = available_cash / total_alloc
-            allocations = [a * factor for a in allocations]
-            total_alloc = sum(allocations)
-
-        for idx, cand in enumerate(selected_candidates):
-            cand['allocation'] = allocations[idx] if idx < len(allocations) else allocations[-1]
-
-        # Tentar abrir posições com entry ladder
-        for cand in selected_candidates:
-            if slots <= 0:
-                break
+        # Executa entradas
+        for cand, alloc_usd in allocations:
+            if alloc_usd <= 0:
+                continue
+            
             sym = cand['symbol']
             price = cand['price']
             atr = cand['atr']
-            allocation = float(cand.get('allocation', CONFIG['min_allocation_per_slot']))
-            p_win = cand['p_win']
+            
+            # define stop e take
+            # NOTA: O stop_dist ainda é calculado para registro interno, 
+            # mas como removemos a lógica de disparo no 'cycle', ele é ignorado na prática.
+            stop_dist = CONFIG['stop_loss_mult'] * atr
+            take_dist = CONFIG['take_profit_mult'] * atr
+            stop_price = price - stop_dist
+            take_price = price + take_dist
 
-            # EV-based risk sizing
-            base_risk_amt = total_equity * CONFIG['risk_per_trade']
-            risk_modifier = 1.0
-            try:
-                ev_per_usd = cand.get('ev_per_usd', 0.0)
-                if ev_per_usd > 0:
-                    risk_modifier = 1.0 + min(2.0, ev_per_usd / 0.01)
-                else:
-                    risk_modifier = max(0.1, 1.0 + ev_per_usd / 0.01)
-            except Exception:
-                risk_modifier = 1.0
-            if CONFIG.get('conservative_mode', True):
-                risk_modifier = min(risk_modifier, 1.15)
-            risk_amt = base_risk_amt * risk_modifier
-
-            stop_dist = atr * CONFIG['stop_loss_mult']
-            if stop_dist <= 0:
-                logger.warning("Pular: stop_dist inválido", symbol=sym, atr=atr)
-                continue
-
-            qty_by_risk = risk_amt / stop_dist
-            cost_by_risk = qty_by_risk * price
-            qty_by_alloc = allocation / price if price > 0 else 0.0
-            qty = min(qty_by_risk, qty_by_alloc)
-            cost = qty * price
-
-            try:
-                if qty > 0 and hasattr(self.carteira.exchange, 'amount_to_precision'):
-                    qty = float(self.carteira.exchange.amount_to_precision(sym, qty))
-                    cost = qty * price
-            except Exception:
-                pass
-
-            if cost < CONFIG['min_trade_usd']:
-                if self.carteira.cash >= CONFIG['min_trade_usd'] and (current_exposure + CONFIG['min_trade_usd']) <= max_allowed_exposure:
-                    cost = CONFIG['min_trade_usd']
-                    qty = cost / price if price > 0 else 0.0
-                    logger.info("Forçando custo mínimo para spot Binance", symbol=sym, custo_real=round(cost, 4))
-                else:
-                    logger.info("Pular: custo calculado abaixo do mínimo e não há margem para forçar", symbol=sym, calc_cost=round(cost, 4))
-                    continue
-
-            current_exposure = sum([p['invested'] for p in self.carteira.posicoes.values()]) if self.carteira.posicoes else 0.0
-            max_allowed_exposure = total_equity * CONFIG['max_exposure_pct']
-            if (current_exposure + cost) > max_allowed_exposure:
-                logger.warning("Pular: Exposição total excedida ao abrir", symbol=sym, would_exposure=round(current_exposure + cost, 4), max_allowed=round(max_allowed_exposure, 4))
-                continue
-
-            if cost > self.carteira.cash:
-                logger.warning("Pular: Saldo livre insuficiente", symbol=sym, cost=round(cost, 4), cash=round(self.carteira.cash, 4))
-                continue
-
-            # Prepara plano de entrada escalonada e abre primeiro step (se houver)
-            entry_plan = self._plan_entry_ladder(price, atr, allocation)
-            first_step = None
-            for step in entry_plan:
-                if not step['done']:
-                    first_step = step
-                    break
-            if not first_step:
-                logger.warning("Sem steps válidos no plano", symbol=sym)
-                continue
-
-            step_qty = first_step['qty']
-            step_price = first_step['price_level']
-            # calcula stop e take com base no price (usando stop_dist)
-            stop_price = max(0.0, step_price - stop_dist)
-            take_price = step_price + (atr * CONFIG['take_profit_mult'])
-
-            ok = self.carteira.abrir_posicao(sym, step_price, step_qty, atr, stop_price=stop_price, take_price=take_price, entry_plan=entry_plan)
-            if ok:
-                slots -= 1
+            # entry steps logic
+            # se tivermos entry_steps > 1, alocamos apenas a primeira parte
+            plan = self._plan_entry_ladder(price, atr, alloc_usd)
+            first_step = plan[0]
+            
+            # Executa primeira compra
+            if self.carteira.abrir_posicao(sym, price, first_step['qty'], atr, stop_price, take_price, entry_plan=plan[1:]):
+                # Grupo cooldown
                 grp = SYMBOL_TO_GROUP.get(sym, 'ungrouped')
-                for s in CONFIG['groups'].get(grp, [sym]):
-                    self.cooldowns[s] = datetime.datetime.now() + datetime.timedelta(seconds=CONFIG['group_cooldown_seconds'])
-                logger.info("Ordem aberta (step 1) e cooldown aplicado ao grupo", symbol=sym, group=grp, allocated=round(cost, 4), p_win=round(p_win, 4))
+                if grp != 'ungrouped':
+                    for s_in_grp in CONFIG['groups'].get(grp, []):
+                        self.cooldowns[s_in_grp] = datetime.datetime.now() + datetime.timedelta(seconds=CONFIG['group_cooldown_seconds'])
+                
+                # Online Learning sample
+                if CONFIG['online_learning'] and sym in self.models and self.models[sym]['partial_fit']:
+                    try:
+                        # Exemplo de label 1 (comprou). O label real virá no futuro (se deu lucro ou nao)
+                        # Aqui apenas salvamos o feature vector para uso posterior se quisermos
+                        pass
+                    except Exception:
+                        pass
 
-    def loop(self):
+    def run(self):
         self.running = True
+        logger.system("🚀 Robô iniciado! Aguardando ciclos...")
         while self.running:
-            try:
-                self.cycle()
-            except Exception as e:
-                logger.error("Erro no ciclo principal", error=str(e))
-
-            for _ in range(CONFIG['sleep_cycle']):
-                if not self.running:
-                    break
-                time.sleep(1)
-
-    def start(self):
-        if not self.running:
-            Thread(target=self.loop, daemon=True).start()
-            logger.system("Robô Iniciado")
+            if self.live_state.get("armed"):
+                try:
+                    self.cycle()
+                except Exception as e:
+                    logger.error("Erro no ciclo principal", error=str(e))
+            else:
+                logger.info("Robô desarmado. Aguardando comando de START...")
+            
+            time.sleep(CONFIG['sleep_cycle'])
 
     def stop(self):
         self.running = False
-        logger.system("Robô Parado")
+        logger.system("🛑 Parando robô...")
+
 
 # =========================
-# API FLASK (integração FRONT preservada)
+# FLASK SERVER
 # =========================
 app = Flask(__name__)
 CORS(app)
-bot = RoboTrader()
 
-
-@app.route('/api/start', methods=['POST'])
-def api_start():
-    bot.start()
-    return jsonify({"status": "started"})
-
-
-@app.route('/api/stop', methods=['POST'])
-def api_stop():
-    bot.stop()
-    return jsonify({"status": "stopped"})
-
-
-@app.route('/api/logs', methods=['GET'])
-def api_logs():
-    return jsonify(list(reversed(logger.buffer)))
-
-
-# --- NEW: endpoint para retornar histórico completo (corrige 'sumiu') ---
-@app.route('/api/history', methods=['GET'])
-def api_history():
-    try:
-        hist = bot.carteira.historico
-        # fallback: tenta ler history file se in-memory vazio
-        if (not hist or len(hist) == 0) and os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, 'r') as f:
-                    hist = json.load(f) or hist
-            except Exception:
-                pass
-        return jsonify(hist)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+robo = RoboTrader()
 
 @app.route('/api/status', methods=['GET'])
-def api_status():
-    open_data = []
-    invested_total = 0.0
-    for sym, val in bot.carteira.posicoes.items():
-        curr = bot.market_prices.get(sym, val['entry_price'])
-        val_now = val['quantity'] * curr
-        pnl = val_now - val['invested']
-        open_data.append({
-            "symbol": sym, "entryPrice": val['entry_price'],
-            "quantity": val['quantity'], "invested": val['invested'],
-            "pnl": pnl, "currentPrice": curr
+def get_status():
+    try:
+        # Prepara posições para JSON
+        pos_list = []
+        total_pnl_open = 0.0
+        
+        # Atualiza preços atuais para PnL em tempo real
+        for sym, p in robo.carteira.posicoes.items():
+            curr_price = robo.market_prices.get(sym, p['entry_price'])
+            qty = p['quantity']
+            invested = p.get('invested', p['entry_price'] * qty)
+            val_now = qty * curr_price
+            pnl = val_now - invested
+            total_pnl_open += pnl
+            
+            pos_list.append({
+                'symbol': sym,
+                'entryPrice': p['entry_price'],
+                'quantity': qty,
+                'invested': invested,
+                'currentPrice': curr_price,
+                'pnl': pnl,
+                'stopPrice': p.get('stop_price'),
+                'takePrice': p.get('take_price')
+            })
+
+        # calcula equity real time
+        balance = robo.carteira.cash
+        equity = balance + sum([p['invested'] + p['pnl'] for p in pos_list])
+
+        return jsonify({
+            'isRunning': robo.live_state.get("armed", False),
+            'balance': balance,
+            'equity': equity,
+            'openPositions': pos_list,
+            'dailyTrades': robo.carteira.daily_trades,
+            'totalTrades': len(robo.carteira.historico),
+            'marketPrices': robo.market_prices,
+            'lastEvent': robo.carteira.last_event
         })
-        invested_total += val['invested']
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-    eq = bot.carteira.cash + invested_total
+@app.route('/api/start', methods=['POST'])
+def start_bot():
+    robo.live_state["armed"] = True
+    with open(LIVE_STATE_FILE, 'w') as f:
+        json.dump(robo.live_state, f)
+    return jsonify({'status': 'started'})
 
-    return jsonify({
-        "isRunning": bot.running,
-        "balance": bot.carteira.cash,
-        "equity": eq,
-        "equityHistory": bot.equity_history,
-        "dailyTrades": bot.carteira.daily_trades,
-        "openPositions": open_data
-    })
+@app.route('/api/stop', methods=['POST'])
+def stop_bot():
+    robo.live_state["armed"] = False
+    with open(LIVE_STATE_FILE, 'w') as f:
+        json.dump(robo.live_state, f)
+    return jsonify({'status': 'stopped'})
 
+@app.route('/api/history', methods=['GET'])
+def get_history():
+    return jsonify(robo.carteira.historico)
+
+@app.route('/api/logs', methods=['GET'])
+def get_logs():
+    return jsonify(logger.buffer)
+
+# --- ADICIONE ISTO NO SEU app.py (pode ser antes de if __name__ == '__main__':) ---
+
+@app.route('/api/close_position', methods=['POST'])
+def api_close_position():
+    """
+    Endpoint para fechar uma posição manualmente (Venda a Mercado).
+    """
+    try:
+        data = request.json
+        symbol = data.get('symbol')
+        
+        if not symbol:
+            return jsonify({'status': 'error', 'message': 'Símbolo não informado'}), 400
+
+        # Verifica se a posição existe na carteira do robô
+        if symbol not in robo.carteira.posicoes:
+            return jsonify({'status': 'error', 'message': 'Posição não encontrada'}), 404
+
+        pos = robo.carteira.posicoes[symbol]
+        quantity = pos.get('quantity', 0.0)
+
+        logger.info(f"Recebida solicitação manual de venda para {symbol}", quantity=quantity)
+
+        # Chama a função interna de reduzir_posicao (vende 100%)
+        # A flag "MANUAL_USER" ajuda a identificar no histórico
+        result = robo.carteira.reduzir_posicao(
+            symbol=symbol, 
+            qty_to_sell=quantity,  # <--- CORREÇÃO AQUI (nome correto do argumento)
+            exit_price=robo.market_prices.get(symbol, pos['entry_price']), # Tenta preço atual ou usa entrada como ref
+            reason="MANUAL_USER"
+        )
+
+        if result:
+             return jsonify({
+                'status': 'success', 
+                'message': f'Ordem de venda enviada para {symbol}',
+                'details': result
+            })
+        else:
+            # Se retornou None/False, pode ter sido erro de Dust ou API
+            return jsonify({'status': 'error', 'message': 'Falha ao executar venda (verifique logs/saldo)'}), 500
+
+    except Exception as e:
+        logger.error("Erro no endpoint manual close", error=str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+def run_flask():
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
-    print("\033[92m=== TRADING REAL (R$ 100/17 USDT) - VERSÃO OPÇÃO C (UPGRADE) ===\033[0m")
-    app.run(host='0.0.0.0', port=5000)
+    # Thread do Robô
+    t_robo = Thread(target=robo.run)
+    t_robo.daemon = True
+    t_robo.start()
+
+    # Thread do Flask
+    # (ou rodar flask na main thread)
+    print("🔥 Servidor rodando na porta 5000...")
+    run_flask()

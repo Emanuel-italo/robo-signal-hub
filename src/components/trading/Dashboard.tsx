@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { 
   Wallet, DollarSign, Activity, Power, TrendingUp, Target, BrainCircuit, 
-  ShieldCheck, Filter, ArrowUpRight, ArrowDownRight, Zap, Volume2, VolumeX 
+  ShieldCheck, Filter, ArrowUpRight, ArrowDownRight, Zap, Volume2, VolumeX,
+  X, Loader2, Coins
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -27,6 +28,7 @@ const COLORS = ['#10b981', '#ef4444']; // Emerald (Win) vs Red (Loss)
 
 const Dashboard = () => {
   // --- ESTADOS E DADOS ---
+  const queryClient = useQueryClient();
   const { data: rawStatus, refetch: refetchStatus } = useQuery({
     queryKey: ["botStatus"],
     queryFn: api.getStatus,
@@ -50,6 +52,9 @@ const Dashboard = () => {
   // Controle de Som
   const [soundEnabled, setSoundEnabled] = useState(true);
   
+  // Controle de loading para venda manual
+  const [loadingSymbol, setLoadingSymbol] = useState<string | null>(null);
+
   // Referências para controle de áudio e eventos (CORREÇÃO DO LOOP/DURAÇÃO)
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -88,6 +93,30 @@ const Dashboard = () => {
 
     } catch (error) {
         console.error("Audio error", error);
+    }
+  };
+
+  // --- LÓGICA DE VENDA MANUAL ---
+  const handleManualSell = async (symbol: string) => {
+    try {
+      setLoadingSymbol(symbol); // Ativa o spinner no botão
+      toast.info(`Enviando ordem de venda para ${symbol}...`);
+
+      // Chama o backend
+      const result = await api.closePosition(symbol);
+
+      if (result && result.status === 'success') {
+        toast.success(`Ordem enviada! Posição de ${symbol} encerrada.`);
+        // Força uma atualização imediata da lista para o ativo sumir da tela
+        await queryClient.invalidateQueries({ queryKey: ["botStatus"] });
+      } else {
+        throw new Error(result?.message || "Erro desconhecido ao vender.");
+      }
+    } catch (error: any) {
+      console.error("Erro venda manual:", error);
+      toast.error(error.response?.data?.message || "Falha ao comunicar com o robô.");
+    } finally {
+      setLoadingSymbol(null); // Desativa o spinner
     }
   };
 
@@ -184,10 +213,10 @@ const Dashboard = () => {
         const totalPnL = positions.reduce((acc, pos) => acc + pos.pnl, 0);
         
         baseMetrics = {
-            title: "PATRIMÔNIO LÍQUIDO",
+            title: "PATRIMÔNIO TOTAL (SE VENDER TUDO)", // Rótulo Corrigido
             value: status.equity,
             subValue: status.balance,
-            subLabel: "Disponível (Caixa)",
+            subLabel: "SALDO LIVRE (PARA GASTAR)", // Rótulo Corrigido
             pnl: totalPnL,
             pnlPercent: totalInvested > 0 ? (totalPnL / totalInvested) * 100 : 0,
             isGlobal: true
@@ -200,7 +229,7 @@ const Dashboard = () => {
             title: `POSIÇÃO: ${pos.symbol}`,
             value: pos.invested + pos.pnl,
             subValue: pos.invested,
-            subLabel: "Investido Inicialmente",
+            subLabel: "Valor Investido",
             pnl: pos.pnl,
             pnlPercent: (pos.pnl / pos.invested) * 100,
             isGlobal: false
@@ -319,7 +348,7 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* --- CONTROL BAR --- */}
+      {/* --- CONTROL BAR E VENDA MANUAL --- */}
       <div className="glass-panel p-4 rounded-xl flex flex-col md:flex-row gap-4 items-center justify-between border-l-4 border-l-red-600">
         <div className="flex items-center gap-3 w-full md:w-auto">
             <div className="p-2 bg-white/5 rounded-lg">
@@ -343,8 +372,26 @@ const Dashboard = () => {
             </div>
         </div>
 
-        {/* ÁREA DE RESULTADO (PnL) AUMENTADA AQUI */}
         <div className="flex items-center gap-6 divide-x divide-white/10 w-full md:w-auto justify-end">
+            {/* BOTÃO DE VENDA MANUAL NO FILTRO */}
+            {selectedAsset !== "GLOBAL" && (
+                <div className="pr-6">
+                    <Button 
+                        variant="destructive"
+                        className="font-bold border border-red-500/30 hover:border-red-500 bg-red-950/50 hover:bg-red-900 transition-all"
+                        onClick={() => handleManualSell(selectedAsset)}
+                        disabled={loadingSymbol === selectedAsset}
+                    >
+                        {loadingSymbol === selectedAsset ? (
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        ) : (
+                            <X className="w-4 h-4 mr-2" />
+                        )}
+                        VENDER {selectedAsset}
+                    </Button>
+                </div>
+            )}
+
             <div className="pl-6 text-right">
                 <p className="text-sm font-bold text-gray-500 uppercase tracking-widest mb-1">Resultado Aberto (PnL)</p>
                 <div className={`flex items-center justify-end gap-3 text-5xl font-black font-mono tracking-tighter ${metrics.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -358,7 +405,7 @@ const Dashboard = () => {
       {/* --- KPI GRID --- */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         
-        {/* CARD 1: PATRIMÔNIO */}
+        {/* CARD 1: PATRIMÔNIO (EQUITY) */}
         <Card className="glass-panel p-6 relative overflow-hidden group hover:border-red-500/40 transition-all duration-300">
           <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
             <TrendingUp className="w-20 h-20 text-red-500" />
@@ -366,6 +413,7 @@ const Dashboard = () => {
           <div>
             <p className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-1">{metrics.title}</p>
             <h3 className="text-4xl font-black text-white tracking-tight">${metrics.value.toFixed(2)}</h3>
+            <p className="text-[10px] text-gray-400 mt-1">Soma do Caixa + Valor das Posições</p>
           </div>
           <div className="h-12 w-full mt-4 opacity-40 group-hover:opacity-60 transition-opacity">
             <ResponsiveContainer width="100%" height="100%">
@@ -376,7 +424,7 @@ const Dashboard = () => {
           </div>
         </Card>
 
-        {/* CARD 2: CAIXA / ALOCADO */}
+        {/* CARD 2: CAIXA (BALANCE) */}
         <Card className="glass-panel p-6 relative overflow-hidden group hover:border-emerald-500/40 transition-all duration-300">
            <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
             <Wallet className="w-20 h-20 text-emerald-500" />
@@ -385,12 +433,13 @@ const Dashboard = () => {
             <div>
               <p className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-1">{metrics.subLabel}</p>
               <h3 className="text-4xl font-black text-white tracking-tight">${metrics.subValue.toFixed(2)}</h3>
+              <p className="text-[10px] text-gray-400 mt-1">Disponível para novas compras</p>
             </div>
             <div className="mt-6 flex items-center gap-2">
                 <div className="p-2 bg-emerald-500/10 rounded-lg border border-emerald-500/20">
                     <DollarSign className="w-4 h-4 text-emerald-400" />
                 </div>
-                <span className="text-sm text-gray-400 font-medium">Líquido Disponível</span>
+                <span className="text-sm text-gray-400 font-medium">Líquido na Binance</span>
             </div>
           </div>
         </Card>
@@ -443,7 +492,7 @@ const Dashboard = () => {
       </div>
 
       {/* --- DETALHAMENTO FINANCEIRO (PROFIT VS LOSS) --- */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {/* CARD LUCRO BRUTO */}
         <Card className="glass-panel p-6 border-l-4 border-l-emerald-500 flex items-center justify-between relative overflow-hidden hover:bg-emerald-500/5 transition-colors group">
             <div className="absolute right-0 top-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity"><ArrowUpRight className="w-32 h-32 text-emerald-500" /></div>
@@ -471,6 +520,29 @@ const Dashboard = () => {
             </div>
             <div className="p-4 bg-red-500/10 rounded-full border border-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.2)]">
                 <Activity className="w-8 h-8 text-red-400" />
+            </div>
+        </Card>
+
+        {/* CARD SALDO LÍQUIDO (NOVO) */}
+        <Card className={`glass-panel p-6 border-l-4 flex items-center justify-between relative overflow-hidden transition-colors group ${
+            (metrics.grossProfit + metrics.grossLoss) >= 0 ? 'border-l-emerald-400 hover:bg-emerald-500/5' : 'border-l-red-500 hover:bg-red-500/5'
+        }`}>
+            <div className="absolute right-0 top-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                <Coins className={`w-32 h-32 ${(metrics.grossProfit + metrics.grossLoss) >= 0 ? 'text-emerald-500' : 'text-red-500'}`} />
+            </div>
+            <div className="relative z-10">
+                <p className={`text-xs font-bold uppercase tracking-widest mb-1 ${(metrics.grossProfit + metrics.grossLoss) >= 0 ? 'text-emerald-500/80' : 'text-red-500/80'}`}>
+                    Resultado Líquido (Net PnL)
+                </p>
+                <h3 className={`text-3xl font-black ${(metrics.grossProfit + metrics.grossLoss) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(metrics.grossProfit + metrics.grossLoss) >= 0 ? '+' : ''}${(metrics.grossProfit + metrics.grossLoss).toFixed(2)}
+                </h3>
+                <p className="text-xs text-gray-500 mt-2 font-medium">Ganho Real (Lucro - Prejuízo)</p>
+            </div>
+            <div className={`p-4 rounded-full border shadow-[0_0_15px_rgba(0,0,0,0.2)] ${(metrics.grossProfit + metrics.grossLoss) >= 0 
+                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' 
+                : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
+                <Coins className="w-8 h-8" />
             </div>
         </Card>
       </div>

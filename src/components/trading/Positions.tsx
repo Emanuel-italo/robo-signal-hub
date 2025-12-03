@@ -1,16 +1,59 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ArrowUpRight, ArrowDownRight, X, Layers, Activity } from "lucide-react";
+import { ArrowUpRight, ArrowDownRight, X, Layers, Activity, Loader2 } from "lucide-react";
 import { api } from "@/services/api";
+import { useToast } from "@/hooks/use-toast";
+import { useState } from "react";
 
 const Positions = () => {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [loadingSymbol, setLoadingSymbol] = useState<string | null>(null);
+
   const { data: status } = useQuery({
     queryKey: ["botStatus"],
     queryFn: api.getStatus,
     refetchInterval: 2000, 
   });
+
+  // --- LÓGICA DE VENDA MANUAL ---
+  const handleManualSell = async (symbol: string) => {
+    try {
+      setLoadingSymbol(symbol); // Ativa o spinner no botão
+      toast({
+        title: "Enviando ordem...",
+        description: `Solicitando venda a mercado para ${symbol}.`,
+      });
+
+      // Chama o backend
+      const result = await api.closePosition(symbol);
+
+      if (result && result.status === 'success') {
+        toast({
+          title: "Ordem Enviada!",
+          description: `Posição de ${symbol} encerrada com sucesso.`,
+          variant: "default",
+          className: "bg-emerald-500 text-white border-none",
+        });
+        // Força uma atualização imediata da lista para o ativo sumir da tela
+        await queryClient.invalidateQueries({ queryKey: ["botStatus"] });
+      } else {
+        throw new Error(result?.message || "Erro desconhecido ao vender.");
+      }
+    } catch (error: any) {
+      console.error("Erro venda manual:", error);
+      toast({
+        title: "Erro na Venda",
+        description: error.response?.data?.message || "Falha ao comunicar com o robô. Verifique se ele está rodando.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoadingSymbol(null); // Desativa o spinner
+    }
+  };
+  // -----------------------------
 
   const positions = status?.openPositions || [];
 
@@ -92,9 +135,22 @@ const Positions = () => {
                   </div>
                 </div>
 
-                {/* Ações */}
-                <Button variant="outline" className="border-red-900/50 text-red-500 hover:bg-red-950 hover:text-red-400 hover:border-red-500 transition-all">
-                  <X className="w-4 h-4 mr-2" /> FECHAR
+                {/* Ações (Botão Vender Agora) */}
+                <Button 
+                  variant="outline" 
+                  className="border-red-900/50 text-red-500 hover:bg-red-950 hover:text-red-400 hover:border-red-500 transition-all cursor-pointer min-w-[140px]"
+                  onClick={() => handleManualSell(pos.symbol)}
+                  disabled={loadingSymbol === pos.symbol}
+                >
+                  {loadingSymbol === pos.symbol ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" /> VENDENDO...
+                    </>
+                  ) : (
+                    <>
+                      <X className="w-4 h-4 mr-2" /> VENDER AGORA
+                    </>
+                  )}
                 </Button>
               </div>
             </Card>

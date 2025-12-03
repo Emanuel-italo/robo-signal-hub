@@ -64,5 +64,17 @@ export const api = {
       const response = await axios.get(`${API_URL}/history`);
       return response.data;
     } catch { return []; }
+  },
+
+  // --- NOVA FUNÇÃO: VENDA MANUAL ---
+  // É essa função que o botão do Dashboard vai chamar
+  closePosition: async (symbol: string) => {
+    try {
+      const response = await axios.post(`${API_URL}/close_position`, { symbol });
+      return response.data;
+    } catch (error) {
+      console.error("Erro ao fechar posição:", error);
+      throw error;
+    }
   }
 };
