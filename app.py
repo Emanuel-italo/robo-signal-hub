@@ -113,7 +113,7 @@ CONFIG = {
     # --- GERENCIAMENTO DE RISCO (AJUSTADO PARA BANCA PEQUENA) ---
     'max_positions': 5,        # Quantas posições simultâneas
     # Stop Loss desativado na lógica (ver abaixo), mantido aqui apenas config legado
-    'stop_loss_mult': 999.0,   # Valor alto para garantir que não acione por acidente
+    'stop_loss_mult': 2.0,   # Valor alto para garantir que não acione por acidente
     'take_profit_mult': 5.0,
     'risk_per_trade': 0.02,    # 2% do patrimônio por trade (ajustável)
     'min_trade_usd': 6.0,      # mínimo da Binance (deixe > 5)
