@@ -66,14 +66,25 @@ export const api = {
     } catch { return []; }
   },
 
-  // --- NOVA FUNÇÃO: VENDA MANUAL ---
-  // É essa função que o botão do Dashboard vai chamar
+  // --- FUNÇÃO: VENDA MANUAL ---
   closePosition: async (symbol: string) => {
     try {
       const response = await axios.post(`${API_URL}/close_position`, { symbol });
       return response.data;
     } catch (error) {
       console.error("Erro ao fechar posição:", error);
+      throw error;
+    }
+  },
+
+  // --- NOVA FUNÇÃO: COMPRA MANUAL ---
+  // Chama o endpoint /api/open_position criado no app.py
+  openPosition: async (symbol: string, amount: number) => {
+    try {
+      const response = await axios.post(`${API_URL}/open_position`, { symbol, amount });
+      return response.data;
+    } catch (error) {
+      console.error("Erro ao abrir posição:", error);
       throw error;
     }
   }

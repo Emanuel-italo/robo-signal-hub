@@ -4,9 +4,10 @@ import { Card } from "@/components/ui/card";
 import { 
   Wallet, DollarSign, Activity, Power, TrendingUp, Target, BrainCircuit, 
   ShieldCheck, Filter, ArrowUpRight, ArrowDownRight, Zap, Volume2, VolumeX,
-  X, Loader2, Coins
+  X, Loader2, Coins, ShoppingCart
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -54,6 +55,11 @@ const Dashboard = () => {
   
   // Controle de loading para venda manual
   const [loadingSymbol, setLoadingSymbol] = useState<string | null>(null);
+
+  // --- NOVOS ESTADOS PARA COMPRA MANUAL ---
+  const [buySymbol, setBuySymbol] = useState("");
+  const [buyAmount, setBuyAmount] = useState("10"); // Valor padrão $10
+  const [isBuying, setIsBuying] = useState(false);
 
   // Referências para controle de áudio e eventos (CORREÇÃO DO LOOP/DURAÇÃO)
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -117,6 +123,39 @@ const Dashboard = () => {
       toast.error(error.response?.data?.message || "Falha ao comunicar com o robô.");
     } finally {
       setLoadingSymbol(null); // Desativa o spinner
+    }
+  };
+
+  // --- LÓGICA DE COMPRA MANUAL ---
+  const handleManualBuy = async () => {
+    if (!buySymbol) {
+      toast.error("Digite o símbolo do ativo (ex: BTC)");
+      return;
+    }
+
+    try {
+      setIsBuying(true);
+      toast.info(`Comprando ${buySymbol.toUpperCase()}...`);
+      
+      // Remove espaços e garante /USDT se o usuário esqueceu
+      let sym = buySymbol.toUpperCase().trim();
+      if (!sym.includes("/")) sym += "/USDT";
+
+      const result = await api.openPosition(sym, parseFloat(buyAmount));
+
+      if (result && result.status === 'success') {
+        toast.success(`Compra realizada com sucesso!`, {
+            description: `${sym} adicionado ao portfólio.`
+        });
+        setBuySymbol(""); // Limpa o input
+        playSound('buy'); // Toca o som de compra
+        await queryClient.invalidateQueries({ queryKey: ["botStatus"] }); // Atualiza tela
+      }
+    } catch (error: any) {
+      console.error("Erro compra manual:", error);
+      toast.error(error.response?.data?.message || "Falha ao comprar.");
+    } finally {
+      setIsBuying(false);
     }
   };
 
@@ -369,6 +408,39 @@ const Dashboard = () => {
                         ))}
                     </SelectContent>
                 </Select>
+            </div>
+        </div>
+
+        {/* --- NOVO BLOCO: COMPRA MANUAL --- */}
+        <div className="flex items-center gap-2 border-l border-white/10 pl-4 ml-4">
+            <div className="flex flex-col">
+                <span className="text-[10px] text-emerald-500 font-bold uppercase block mb-1">
+                    Compra Rápida ($)
+                </span>
+                <div className="flex items-center gap-2">
+                    <Input 
+                        placeholder="Ativo (ex: ETH)" 
+                        className="w-24 h-10 bg-black/40 border-emerald-500/30 text-white font-bold placeholder:text-gray-600 focus:border-emerald-500"
+                        value={buySymbol}
+                        onChange={(e) => setBuySymbol(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleManualBuy()}
+                    />
+                    <Input 
+                        type="number"
+                        placeholder="$" 
+                        className="w-16 h-10 bg-black/40 border-emerald-500/30 text-white font-bold focus:border-emerald-500 text-center"
+                        value={buyAmount}
+                        onChange={(e) => setBuyAmount(e.target.value)}
+                    />
+                    <Button 
+                        size="icon"
+                        className="h-10 w-10 bg-emerald-600 hover:bg-emerald-500 text-white"
+                        onClick={handleManualBuy}
+                        disabled={isBuying}
+                    >
+                        {isBuying ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShoppingCart className="w-4 h-4" />}
+                    </Button>
+                </div>
             </div>
         </div>
 

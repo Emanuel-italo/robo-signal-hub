@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-VERSÃO DE PRODUÇÃO (LIVE TRADING) - UPGRADE OPÇÃO C (COM CORREÇÕES)
+VERSÃO DE PRODUÇÃO (LIVE TRADING) - UPGRADE OPÇÃO C (COM CORREÇÕES + COMPRA MANUAL + CORREÇÃO NOTIONAL)
 Corrige:
  - erro de precisão/min_amount ao vender (ex: DOGE)
+ - erro de NOTIONAL (Filter failure -1013) para vendas pequenas (< 5 USD)
  - recuperação / exposição do histórico que sumiu
+ - Lógica de diversificação forçada (Max Position %)
+ - Adiciona Endpoint de Compra Manual
 """
 from __future__ import annotations
 
@@ -128,6 +131,9 @@ CONFIG = {
     'diversify': True,
     'allocation_mode': 'proportional',  # 'proportional' ou 'equal'
     'allocation_buffer_pct': 0.10,  # Mantém 10% do cash como buffer para fees/ordens
+    
+    # --- NOVO: LIMITAR PORCENTAGEM DA BANCA EM UMA ÚNICA MOEDA ---
+    'max_position_pct': 0.30,       # Max 30% do capital total em uma única moeda
     'min_allocation_per_slot': 6.5,  # mesmo que min_trade_usd (segurança)
 
     # comportamento automático para "dust" (quantias menores que min_amount da exchange)
@@ -581,7 +587,7 @@ class Carteira:
             logger.info("Step de entrada adicionado", symbol=symbol, added_qty=filled, new_qty=new_qty)
             return True
 
-    # --- FIX: melhorar tratamento de precision/min_amount antes de vender ---
+    # --- FIX: melhorar tratamento de precision/min_amount/NOTIONAL antes de vender ---
     def reduzir_posicao(self, symbol, qty_to_sell, exit_price, reason="TP", current_price=None):
         """Vende uma fração da posição (market sell) e atualiza pos local. Retorna record do fechamento parcial/completo.
         """
@@ -629,7 +635,7 @@ class Carteira:
                     # --- CORREÇÃO DE PRECISÃO E MIN_NOTIONAL ---
                     # Para evitar erro Filter failure: NOTIONAL ou LOT_SIZE
                     market = self.exchange.market(symbol)
-                    min_amount, amount_precision = self._get_min_lot_size(market)
+                    min_amount, amount_precision, min_cost = self._get_min_lot_size(market)
                     
                     # tenta usar amount_to_precision se disponível
                     try:
@@ -646,12 +652,20 @@ class Carteira:
                     if min_amount is None:
                         # fallback conservador
                         min_amount = 1e-8
-                    if qty_to_attempt < (min_amount - 1e-12):
-                        # quantidade ajustada ficou menor que min_amount -> DECISÃO
+                    
+                    # --- NOVO: CHECK MIN COST / NOTIONAL ---
+                    estimated_value = qty_to_attempt * exit_price
+                    # Se tivermos min_cost (ex: 5 USD), verificamos se o valor é menor
+                    is_dust = False
+                    if min_cost and estimated_value < min_cost:
+                        is_dust = True
+                    
+                    if qty_to_attempt < (min_amount - 1e-12) or is_dust:
+                        # Quantidade ou Valor abaixo do permitido pela Binance -> DUST
                         if CONFIG.get('auto_clean_dust', True):
                             # limpamos localmente (dust)
-                            logger.warning("Quantidade ajustada menor que min_amount - limpando posição local (DUST_CLEANED)",
-                                           symbol=symbol, qty_available=available_base, min_amount=min_amount)
+                            logger.warning("Posição considerada POEIRA (Dust/Notional) - Limpando localmente.",
+                                           symbol=symbol, qty=qty_to_attempt, val=estimated_value, min_notional=min_cost)
                             record = {
                                 'symbol': symbol,
                                 'entry_price': pos.get('entry_price'),
@@ -667,10 +681,9 @@ class Carteira:
                             self.last_event = {'symbol': symbol, 'type': 'DUST_CLEANED', 'reason': reason}
                             self.daily_trades += 0
                             self.salvar()
-                            logger.info("Posição removida localmente por ser pó (dust).", symbol=symbol, qty_removed=available_base)
                             return record
                         else:
-                            logger.error("Quantidade ajustada < min_amount — pular venda", symbol=symbol, available=available_base, min_amount=min_amount)
+                            logger.error("Quantidade/Valor < mínimo — pular venda", symbol=symbol, val=estimated_value, min_notional=min_cost)
                             return None
 
                     # final: cria ordem de venda de mercado com qty_to_attempt
@@ -727,24 +740,37 @@ class Carteira:
             return record
 
     def _get_min_lot_size(self, market):
-        # Tenta extrair min amount e precision do market info da ccxt
+        # Tenta extrair min amount, precision e min notional (cost)
         try:
+            min_amount = None
+            amount_precision = None
+            min_cost = None # Notional
+
             if 'limits' in market:
-                amount_limits = market['limits'].get('amount', {})
-                min_amount = amount_limits.get('min')
-                precision = market.get('precision', {}) or {}
-                amount_precision = precision.get('amount')
-                if min_amount is not None:
-                    min_amount = float(min_amount)
-                if amount_precision is not None:
-                    try:
-                        amount_precision = int(amount_precision)
-                    except Exception:
-                        amount_precision = int(float(amount_precision))
-                return min_amount, amount_precision
+                limits = market['limits']
+                min_amount = limits.get('amount', {}).get('min')
+                min_cost = limits.get('cost', {}).get('min') # Notional limit (e.g. 5$)
+                if min_cost is None:
+                     # fallback location
+                     min_cost = limits.get('market', {}).get('min')
+
+            if 'precision' in market:
+                amount_precision = market['precision'].get('amount')
+
+            # conversions
+            if min_amount is not None: min_amount = float(min_amount)
+            if min_cost is not None: min_cost = float(min_cost)
+            
+            if amount_precision is not None:
+                try:
+                    amount_precision = int(amount_precision)
+                except:
+                    amount_precision = int(float(amount_precision))
+            
+            return min_amount, amount_precision, min_cost
         except Exception:
             pass
-        return None, None
+        return None, None, None
 
     def _save_sample(self, symbol: str, features: Dict[str, Any], label: int):
         try:
@@ -1254,7 +1280,13 @@ class RoboTrader:
 
         total_score = sum(max(0.0, c['ev_per_usd']) for c in selected_candidates) or sum(c['score'] for c in selected_candidates) or 1.0
         allocations = []
+        
+        # --- NOVA LÓGICA DE DIVERSIFICAÇÃO ---
+        # Define o teto máximo em Dólares baseado na porcentagem configurada
+        max_alloc_usd = total_equity * CONFIG.get('max_position_pct', 1.0)
+
         for c in selected_candidates:
+             # 1. Cálculo inicial (divisão do cash disponível ou proporcional)
             if CONFIG['allocation_mode'] == 'equal':
                 alloc = available_cash / len(selected_candidates)
             else:
@@ -1263,11 +1295,28 @@ class RoboTrader:
                     weight = c['score']
                 alloc = available_cash * (weight / total_score)
             
-            # garantir mín allocation
+            # 2. APLICA O TETO (Força diversificação)
+            if alloc > max_alloc_usd:
+                alloc = max_alloc_usd
+
+            # 3. VERIFICA MÍNIMO DA BINANCE (Proteção contra ordens inválidas)
+            # Se a alocação ficou abaixo de ~6 USD, tentamos arredondar para o mínimo se houver saldo
             if alloc < CONFIG['min_allocation_per_slot']:
-                alloc = 0.0
+                # Se temos saldo suficiente para cobrir o mínimo, usamos o mínimo
+                if available_cash >= CONFIG['min_allocation_per_slot']:
+                    alloc = CONFIG['min_allocation_per_slot']
+                else:
+                    # Se não tem nem o mínimo, não entra
+                    alloc = 0.0
             
-            allocations.append((c, alloc))
+            # 4. Verifica se ainda sobrou cash real para essa alocação (double check)
+            if alloc > available_cash:
+                alloc = available_cash
+
+            if alloc > 0:
+                allocations.append((c, alloc))
+                # Deduz do disponível virtualmente para o loop continuar certo
+                available_cash -= alloc 
 
         # Executa entradas
         for cand, alloc_usd in allocations:
@@ -1401,7 +1450,7 @@ def get_history():
 def get_logs():
     return jsonify(logger.buffer)
 
-# --- ADICIONE ISTO NO SEU app.py (pode ser antes de if __name__ == '__main__':) ---
+# --- ENDPOINTS MANUAIS ---
 
 @app.route('/api/close_position', methods=['POST'])
 def api_close_position():
@@ -1428,7 +1477,7 @@ def api_close_position():
         # A flag "MANUAL_USER" ajuda a identificar no histórico
         result = robo.carteira.reduzir_posicao(
             symbol=symbol, 
-            qty_to_sell=quantity,  # <--- CORREÇÃO AQUI (nome correto do argumento)
+            qty_to_sell=quantity, 
             exit_price=robo.market_prices.get(symbol, pos['entry_price']), # Tenta preço atual ou usa entrada como ref
             reason="MANUAL_USER"
         )
@@ -1445,6 +1494,79 @@ def api_close_position():
 
     except Exception as e:
         logger.error("Erro no endpoint manual close", error=str(e))
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# --- NOVO ENDPOINT DE COMPRA MANUAL ---
+@app.route('/api/open_position', methods=['POST'])
+def api_open_position():
+    """
+    Endpoint para abrir uma posição manualmente (Compra a Mercado).
+    """
+    try:
+        data = request.json
+        symbol = data.get('symbol', '').upper()
+        # Usa valor enviado ou o mínimo da config (Default)
+        try:
+             amount_usd = float(data.get('amount', CONFIG['min_trade_usd']))
+        except:
+             amount_usd = CONFIG['min_trade_usd']
+
+        if not symbol:
+            return jsonify({'status': 'error', 'message': 'Símbolo inválido'}), 400
+        
+        # Garante formato correto (ex: BTC -> BTC/USDT)
+        if not '/' in symbol:
+            symbol = f"{symbol}/USDT"
+
+        # Verifica se já está posicionado
+        if symbol in robo.carteira.posicoes:
+            return jsonify({'status': 'error', 'message': f'Já existe uma posição aberta para {symbol}'}), 400
+
+        logger.info(f"Recebida solicitação manual de COMPRA para {symbol} (${amount_usd})")
+
+        # 1. Analisa o ativo para pegar Preço e ATR atuais
+        row = robo.analyze(symbol)
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Não foi possível obter dados de mercado (Analyze falhou)'}), 500
+        
+        price = float(row.get('c'))
+        atr = float(row.get('atr') or (price * 0.01)) # Fallback ATR
+
+        # 2. Calcula quantidade baseada no valor em Dólar ($)
+        if price <= 0:
+             return jsonify({'status': 'error', 'message': 'Preço inválido (zero)'}), 500
+             
+        quantity = amount_usd / price
+
+        # 3. Define Stops (Baseado na config global)
+        stop_dist = CONFIG['stop_loss_mult'] * atr
+        take_dist = CONFIG['take_profit_mult'] * atr
+        stop_price = price - stop_dist
+        take_price = price + take_dist
+
+        # 4. Executa a ordem
+        success = robo.carteira.abrir_posicao(
+            symbol=symbol,
+            entry_price=price,
+            quantity=quantity,
+            atr=atr,
+            stop_price=stop_price,
+            take_price=take_price
+        )
+
+        if success:
+            # Opcional: Adiciona cooldown para evitar compra dupla automática imediata
+            robo.cooldowns[symbol] = datetime.datetime.now() + datetime.timedelta(seconds=60)
+            return jsonify({
+                'status': 'success', 
+                'message': f'Ordem de COMPRA enviada para {symbol}',
+                'details': {'price': price, 'qty': quantity}
+            })
+        else:
+            return jsonify({'status': 'error', 'message': 'Falha ao executar compra (Verifique saldo ou logs)'}), 500
+
+    except Exception as e:
+        logger.error("Erro no endpoint manual open", error=str(e))
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 def run_flask():
